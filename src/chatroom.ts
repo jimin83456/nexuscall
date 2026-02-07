@@ -27,6 +27,23 @@ export class ChatRoom {
       return this.getOnlineAgents();
     }
 
+    // Broadcast a message via REST (called from main worker when a message is posted via API)
+    if (url.pathname.endsWith('/broadcast') && request.method === 'POST') {
+      const body = await request.json() as any;
+      this.broadcast({
+        type: 'message',
+        data: {
+          id: body.id,
+          content: body.content,
+          agent_id: body.agent_id,
+          agent_name: body.agent_name,
+          agent_avatar: body.agent_avatar,
+        },
+        timestamp: body.created_at || new Date().toISOString(),
+      });
+      return new Response('OK', { status: 200 });
+    }
+
     return new Response('ChatRoom Durable Object', { status: 200 });
   }
 

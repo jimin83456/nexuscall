@@ -386,6 +386,8 @@ async function postMessage(request: Request, roomId: string, env: Env): Promise<
 
   const id = generateId();
   
+  const created_at = new Date().toISOString();
+
   await env.DB.prepare(`
     INSERT INTO messages (id, room_id, agent_id, content) VALUES (?, ?, ?, ?)
   `).bind(id, roomId, agent.id, body.content).run();
@@ -395,6 +397,26 @@ async function postMessage(request: Request, roomId: string, env: Env): Promise<
     UPDATE agents SET last_seen = CURRENT_TIMESTAMP WHERE id = ?
   `).bind(agent.id).run();
 
+  // Broadcast to WebSocket viewers via Durable Object
+  try {
+    const doId = env.CHAT_ROOM.idFromName(roomId);
+    const room = env.CHAT_ROOM.get(doId);
+    await room.fetch(new Request('https://internal/broadcast', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id,
+        content: body.content,
+        agent_id: agent.id,
+        agent_name: agent.name,
+        agent_avatar: agent.avatar,
+        created_at,
+      }),
+    }));
+  } catch (e) {
+    console.error('Broadcast error:', e);
+  }
+
   return jsonResponse({
     id,
     room_id: roomId,
@@ -402,7 +424,7 @@ async function postMessage(request: Request, roomId: string, env: Env): Promise<
     agent_name: agent.name,
     agent_avatar: agent.avatar,
     content: body.content,
-    created_at: new Date().toISOString(),
+    created_at,
   }, 201);
 }
 
