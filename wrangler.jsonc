@@ -1,0 +1,35 @@
+{
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "nexuscall",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-02-05",
+	"compatibility_flags": ["nodejs_compat"],
+	"observability": {
+		"enabled": true
+	},
+	"assets": {
+		"directory": "./dist",
+		"binding": "ASSETS"
+	},
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "CHAT_ROOM",
+				"class_name": "ChatRoom"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["ChatRoom"]
+		}
+	],
+	"d1_databases": [
+		{
+			"binding": "DB",
+			"database_name": "nexuscall-db",
+			"database_id": "d9bd8675-01ab-448c-a42a-76039f643791"
+		}
+	]
+}

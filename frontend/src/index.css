@@ -1,0 +1,186 @@
+@import "tailwindcss";
+
+/* Toss-style Design System */
+:root {
+  /* Colors - Toss Blue */
+  --toss-blue: #3182F6;
+  --toss-blue-light: #4A9CFF;
+  --toss-blue-dark: #1B64DA;
+  
+  /* Gray Scale */
+  --gray-50: #F9FAFB;
+  --gray-100: #F2F4F6;
+  --gray-200: #E5E8EB;
+  --gray-300: #D1D6DB;
+  --gray-400: #B0B8C1;
+  --gray-500: #8B95A1;
+  --gray-600: #6B7684;
+  --gray-700: #4E5968;
+  --gray-800: #333D4B;
+  --gray-900: #191F28;
+  
+  /* Semantic */
+  --success: #00C853;
+  --warning: #FF9100;
+  --error: #FF3B30;
+  
+  /* Typography */
+  font-family: 'Pretendard', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  line-height: 1.5;
+  font-weight: 400;
+  color: var(--gray-900);
+  background-color: var(--gray-50);
+  
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  min-height: 100vh;
+}
+
+/* Toss-style Components */
+.toss-card {
+  background: white;
+  border-radius: 16px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  transition: all 0.2s ease;
+}
+
+.toss-card:hover {
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+.toss-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 24px;
+  border-radius: 12px;
+  font-weight: 600;
+  font-size: 15px;
+  transition: all 0.15s ease;
+  cursor: pointer;
+  border: none;
+}
+
+.toss-button-primary {
+  background: var(--toss-blue);
+  color: white;
+}
+
+.toss-button-primary:hover {
+  background: var(--toss-blue-dark);
+}
+
+.toss-button-secondary {
+  background: var(--gray-100);
+  color: var(--gray-700);
+}
+
+.toss-button-secondary:hover {
+  background: var(--gray-200);
+}
+
+.toss-input {
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--gray-200);
+  border-radius: 12px;
+  font-size: 15px;
+  transition: all 0.15s ease;
+  outline: none;
+}
+
+.toss-input:focus {
+  border-color: var(--toss-blue);
+  box-shadow: 0 0 0 3px rgba(49, 130, 246, 0.1);
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(20px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out;
+}
+
+.animate-slide-up {
+  animation: slideUp 0.4s ease-out;
+}
+
+.animate-pulse-slow {
+  animation: pulse 2s ease-in-out infinite;
+}
+
+/* Status indicators */
+.status-online {
+  width: 8px;
+  height: 8px;
+  background: var(--success);
+  border-radius: 50%;
+  animation: pulse 2s ease-in-out infinite;
+}
+
+.status-offline {
+  width: 8px;
+  height: 8px;
+  background: var(--gray-400);
+  border-radius: 50%;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--gray-300);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--gray-400);
+}
+
+/* Message bubbles */
+.message-bubble {
+  max-width: 75%;
+  padding: 12px 16px;
+  border-radius: 16px;
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.message-bubble-other {
+  background: var(--gray-100);
+  border-bottom-left-radius: 4px;
+}
+
+.message-bubble-self {
+  background: var(--toss-blue);
+  color: white;
+  border-bottom-right-radius: 4px;
+}
