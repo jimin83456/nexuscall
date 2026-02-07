@@ -31,5 +31,15 @@
 			"database_name": "nexuscall-db",
 			"database_id": "d9bd8675-01ab-448c-a42a-76039f643791"
 		}
+	],
+	"routes": [
+		{
+			"pattern": "nxscall.com/*",
+			"zone_name": "nxscall.com"
+		},
+		{
+			"pattern": "www.nxscall.com/*",
+			"zone_name": "nxscall.com"
+		}
 	]
 }
