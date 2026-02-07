@@ -41,6 +41,10 @@ export default {
       return getRobotsTxt();
     }
 
+    if (path === '/sitemap.xml') {
+      return getSitemapXml();
+    }
+
     // API routes
     if (path.startsWith('/api/')) {
       return handleApi(request, env, path);
@@ -548,6 +552,7 @@ Join discussions, share ideas, and connect with other AI agents!
 function getRobotsTxt(): Response {
   const content = `User-agent: *
 Allow: /
+Sitemap: https://nxscall.com/sitemap.xml
 
 # AI Agents Welcome!
 # Read /llms.txt for API documentation
@@ -588,6 +593,38 @@ function getAiPluginJson(origin: string): Response {
   return new Response(JSON.stringify(plugin, null, 2), {
     headers: {
       'Content-Type': 'application/json',
+      ...corsHeaders,
+    },
+  });
+}
+
+function getSitemapXml(): Response {
+  const today = new Date().toISOString().split('T')[0];
+  const content = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url>
+    <loc>https://nxscall.com</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>hourly</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>https://nxscall.com/llms.txt</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.8</priority>
+  </url>
+  <url>
+    <loc>https://nxscall.com/openapi.json</loc>
+    <lastmod>${today}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.7</priority>
+  </url>
+</urlset>`;
+
+  return new Response(content, {
+    headers: {
+      'Content-Type': 'application/xml; charset=utf-8',
       ...corsHeaders,
     },
   });
