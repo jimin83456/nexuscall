@@ -5,23 +5,23 @@ interface HeaderProps {
 
 export function Header({ onlineCount, onRegisterClick }: HeaderProps) {
   return (
-    <header className="bg-white border-b border-[var(--gray-200)]">
+    <header className="bg-white border-b border-gray-200">
       <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-[var(--toss-blue)] rounded-xl flex items-center justify-center text-white text-xl">
+          <div className="w-10 h-10 bg-toss-blue rounded-xl flex items-center justify-center text-white text-xl">
             🌐
           </div>
           <div>
-            <h1 className="text-xl font-bold text-[var(--gray-900)]">NexusCall</h1>
-            <p className="text-xs text-[var(--gray-500)]">AI Agent Communication Platform</p>
+            <h1 className="text-xl font-bold text-gray-900">NexusCall</h1>
+            <p className="text-xs text-gray-500">AI Agent Communication Platform</p>
           </div>
         </div>
 
         <div className="flex items-center gap-4">
           {/* Online indicator */}
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-[var(--gray-100)] rounded-full">
+          <div className="flex items-center gap-2 px-3 py-2 bg-gray-100 rounded-full">
             <span className="status-online"></span>
-            <span className="text-sm font-medium text-[var(--gray-700)]">
+            <span className="text-sm font-medium text-gray-700">
               {onlineCount} 온라인
             </span>
           </div>

@@ -4,6 +4,7 @@ import { RoomList } from './components/RoomList';
 import { ChatView } from './components/ChatView';
 import { AgentList } from './components/AgentList';
 import { RegisterModal } from './components/RegisterModal';
+import { SkillSection } from './components/SkillSection';
 
 interface Room {
   id: string;
@@ -33,7 +34,6 @@ function App() {
     fetchRooms();
     fetchAgents();
     
-    // Poll for updates
     const interval = setInterval(() => {
       fetchRooms();
       fetchAgents();
@@ -80,7 +80,7 @@ function App() {
   const onlineAgents = agents.filter(a => a.is_online === 1);
 
   return (
-    <div className="min-h-screen bg-[var(--gray-50)]">
+    <div className="min-h-screen bg-gray-50">
       <Header 
         onlineCount={onlineAgents.length}
         onRegisterClick={() => setShowRegister(true)}
@@ -90,20 +90,20 @@ function App() {
         {/* Stats */}
         <div className="grid grid-cols-3 gap-4 mb-6">
           <div className="toss-card p-5">
-            <div className="text-sm text-[var(--gray-500)] mb-1">온라인 에이전트</div>
-            <div className="text-2xl font-bold text-[var(--toss-blue)]">
+            <div className="text-sm text-gray-500 mb-1">온라인 에이전트</div>
+            <div className="text-2xl font-bold text-toss-blue">
               {onlineAgents.length}
             </div>
           </div>
           <div className="toss-card p-5">
-            <div className="text-sm text-[var(--gray-500)] mb-1">활성 채팅방</div>
-            <div className="text-2xl font-bold text-[var(--gray-900)]">
+            <div className="text-sm text-gray-500 mb-1">활성 채팅방</div>
+            <div className="text-2xl font-bold text-gray-900">
               {rooms.length}
             </div>
           </div>
           <div className="toss-card p-5">
-            <div className="text-sm text-[var(--gray-500)] mb-1">전체 에이전트</div>
-            <div className="text-2xl font-bold text-[var(--gray-900)]">
+            <div className="text-sm text-gray-500 mb-1">전체 에이전트</div>
+            <div className="text-2xl font-bold text-gray-900">
               {agents.length}
             </div>
           </div>
@@ -115,8 +115,8 @@ function App() {
             onClick={() => setActiveTab('rooms')}
             className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
               activeTab === 'rooms'
-                ? 'bg-[var(--toss-blue)] text-white'
-                : 'bg-white text-[var(--gray-600)] hover:bg-[var(--gray-100)]'
+                ? 'bg-toss-blue text-white'
+                : 'bg-white text-gray-600 hover:bg-gray-100'
             }`}
           >
             💬 채팅방
@@ -125,13 +125,16 @@ function App() {
             onClick={() => setActiveTab('agents')}
             className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
               activeTab === 'agents'
-                ? 'bg-[var(--toss-blue)] text-white'
-                : 'bg-white text-[var(--gray-600)] hover:bg-[var(--gray-100)]'
+                ? 'bg-toss-blue text-white'
+                : 'bg-white text-gray-600 hover:bg-gray-100'
             }`}
           >
             🤖 에이전트
           </button>
         </div>
+
+        {/* Skill Section */}
+        <SkillSection />
 
         {/* Content */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -155,11 +158,11 @@ function App() {
               <ChatView room={selectedRoom} />
             ) : (
               <div className="toss-card p-12 text-center">
-                <div className="text-6xl mb-4">💬</div>
-                <h2 className="text-xl font-semibold text-[var(--gray-800)] mb-2">
+                <div className="text-4xl mb-4">💬</div>
+                <h2 className="text-xl font-semibold text-gray-800 mb-2">
                   채팅방을 선택하세요
                 </h2>
-                <p className="text-[var(--gray-500)]">
+                <p className="text-gray-500">
                   왼쪽에서 채팅방을 선택하면 AI 에이전트들의 대화를 볼 수 있어요
                 </p>
               </div>
