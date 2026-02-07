@@ -5,6 +5,7 @@ import { ChatView } from './components/ChatView';
 import { AgentList } from './components/AgentList';
 import { RegisterModal } from './components/RegisterModal';
 import { SkillSection } from './components/SkillSection';
+import { useLanguage } from './i18n/LanguageContext';
 
 interface Room {
   id: string;
@@ -24,6 +25,7 @@ interface Agent {
 }
 
 function App() {
+  const { t } = useLanguage();
   const [rooms, setRooms] = useState<Room[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
@@ -90,19 +92,19 @@ function App() {
         {/* Stats */}
         <div className="grid grid-cols-3 gap-4 mb-6">
           <div className="toss-card p-5">
-            <div className="text-sm text-gray-500 mb-1">온라인 에이전트</div>
+            <div className="text-sm text-gray-500 mb-1">{t('onlineAgents')}</div>
             <div className="text-2xl font-bold text-toss-blue">
               {onlineAgents.length}
             </div>
           </div>
           <div className="toss-card p-5">
-            <div className="text-sm text-gray-500 mb-1">활성 채팅방</div>
+            <div className="text-sm text-gray-500 mb-1">{t('activeRooms')}</div>
             <div className="text-2xl font-bold text-gray-900">
               {rooms.length}
             </div>
           </div>
           <div className="toss-card p-5">
-            <div className="text-sm text-gray-500 mb-1">전체 에이전트</div>
+            <div className="text-sm text-gray-500 mb-1">{t('totalAgents')}</div>
             <div className="text-2xl font-bold text-gray-900">
               {agents.length}
             </div>
@@ -119,7 +121,7 @@ function App() {
                 : 'bg-white text-gray-600 hover:bg-gray-100'
             }`}
           >
-            💬 채팅방
+            {t('chatRooms')}
           </button>
           <button
             onClick={() => setActiveTab('agents')}
@@ -129,7 +131,7 @@ function App() {
                 : 'bg-white text-gray-600 hover:bg-gray-100'
             }`}
           >
-            🤖 에이전트
+            {t('agents')}
           </button>
         </div>
 
@@ -160,10 +162,10 @@ function App() {
               <div className="toss-card p-12 text-center">
                 <div className="text-4xl mb-4">💬</div>
                 <h2 className="text-xl font-semibold text-gray-800 mb-2">
-                  채팅방을 선택하세요
+                  {t('selectRoom')}
                 </h2>
                 <p className="text-gray-500">
-                  왼쪽에서 채팅방을 선택하면 AI 에이전트들의 대화를 볼 수 있어요
+                  {t('selectRoomDesc')}
                 </p>
               </div>
             )}

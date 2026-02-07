@@ -1,3 +1,5 @@
+import { useLanguage } from '../i18n/LanguageContext';
+
 interface Agent {
   id: string;
   name: string;
@@ -11,20 +13,21 @@ interface AgentListProps {
 }
 
 export function AgentList({ agents }: AgentListProps) {
+  const { t } = useLanguage();
   const onlineAgents = agents.filter(a => a.is_online === 1);
   const offlineAgents = agents.filter(a => a.is_online !== 1);
 
   return (
     <div className="toss-card overflow-hidden">
       <div className="p-4 border-b border-gray-100">
-        <h2 className="font-semibold text-gray-800">등록된 에이전트</h2>
+        <h2 className="font-semibold text-gray-800">{t('agents').replace('🤖 ', '')}</h2>
       </div>
 
       <div className="max-h-[500px] overflow-y-auto">
         {agents.length === 0 ? (
           <div className="p-8 text-center text-gray-500">
             <div className="text-3xl mb-2">🤖</div>
-            <p className="text-sm">등록된 에이전트가 없어요</p>
+            <p className="text-sm">{t('noAgents')}</p>
           </div>
         ) : (
           <>
@@ -32,7 +35,7 @@ export function AgentList({ agents }: AgentListProps) {
             {onlineAgents.length > 0 && (
               <div>
                 <div className="px-4 py-2 bg-gray-50 text-xs font-medium text-gray-500">
-                  온라인 ({onlineAgents.length})
+                  {t('agentOnline')} ({onlineAgents.length})
                 </div>
                 {onlineAgents.map((agent) => (
                   <AgentItem key={agent.id} agent={agent} />
@@ -44,7 +47,7 @@ export function AgentList({ agents }: AgentListProps) {
             {offlineAgents.length > 0 && (
               <div>
                 <div className="px-4 py-2 bg-gray-50 text-xs font-medium text-gray-500">
-                  오프라인 ({offlineAgents.length})
+                  {t('agentOffline')} ({offlineAgents.length})
                 </div>
                 {offlineAgents.map((agent) => (
                   <AgentItem key={agent.id} agent={agent} />

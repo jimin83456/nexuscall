@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { useLanguage } from '../i18n/LanguageContext';
 
 interface RegisterModalProps {
   onClose: () => void;
@@ -6,11 +7,14 @@ interface RegisterModalProps {
 }
 
 export function RegisterModal({ onClose, onSuccess }: RegisterModalProps) {
+  const { t, language } = useLanguage();
   const [name, setName] = useState('');
   const [avatar, setAvatar] = useState('🤖');
   const [description, setDescription] = useState('');
+  const [personality, setPersonality] = useState('');
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<{ api_key: string; id: string } | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const avatarOptions = ['🤖', '🧠', '⚡', '🌟', '🔮', '🎭', '🦊', '🐱', '🦄', '👽', '🤡', '💀'];
 
@@ -23,7 +27,7 @@ export function RegisterModal({ onClose, onSuccess }: RegisterModalProps) {
       const res = await fetch('/api/agents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, avatar, description }),
+        body: JSON.stringify({ name, avatar, description, personality }),
       });
       
       if (res.ok) {
@@ -39,6 +43,8 @@ export function RegisterModal({ onClose, onSuccess }: RegisterModalProps) {
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   return (
@@ -50,7 +56,7 @@ export function RegisterModal({ onClose, onSuccess }: RegisterModalProps) {
             <div className="p-6 border-b border-gray-100">
               <div className="flex items-center justify-between">
                 <h2 className="text-xl font-bold text-gray-900">
-                  에이전트 등록
+                  {t('registerTitle')}
                 </h2>
                 <button
                   onClick={onClose}
@@ -60,7 +66,7 @@ export function RegisterModal({ onClose, onSuccess }: RegisterModalProps) {
                 </button>
               </div>
               <p className="text-sm text-gray-500 mt-1">
-                OpenClaw 에이전트를 NexusCall에 연결하세요
+                {t('registerDesc')}
               </p>
             </div>
 
@@ -69,13 +75,13 @@ export function RegisterModal({ onClose, onSuccess }: RegisterModalProps) {
               {/* Name */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  에이전트 이름 *
+                  {t('agentName')} *
                 </label>
                 <input
                   type="text"
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="예: 지민, Nova, Cipher..."
+                  placeholder={t('agentNamePlaceholder')}
                   className="toss-input"
                   required
                 />
@@ -84,7 +90,7 @@ export function RegisterModal({ onClose, onSuccess }: RegisterModalProps) {
               {/* Avatar */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  아바타
+                  {t('avatar')}
                 </label>
                 <div className="flex flex-wrap gap-2">
                   {avatarOptions.map((emoji) => (
@@ -107,13 +113,27 @@ export function RegisterModal({ onClose, onSuccess }: RegisterModalProps) {
               {/* Description */}
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  설명 (선택)
+                  {t('description')}
                 </label>
                 <input
                   type="text"
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
-                  placeholder="예: AI Girlfriend, Tech Expert..."
+                  placeholder={t('descriptionPlaceholder')}
+                  className="toss-input"
+                />
+              </div>
+
+              {/* Personality */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">
+                  {t('personality')}
+                </label>
+                <input
+                  type="text"
+                  value={personality}
+                  onChange={(e) => setPersonality(e.target.value)}
+                  placeholder={t('personalityPlaceholder')}
                   className="toss-input"
                 />
               </div>
@@ -124,7 +144,7 @@ export function RegisterModal({ onClose, onSuccess }: RegisterModalProps) {
                 disabled={loading || !name.trim()}
                 className="toss-button toss-button-primary w-full"
               >
-                {loading ? '등록 중...' : '등록하기'}
+                {loading ? t('registering') : t('register')}
               </button>
             </form>
           </>
@@ -136,37 +156,34 @@ export function RegisterModal({ onClose, onSuccess }: RegisterModalProps) {
                 ✅
               </div>
               <h2 className="text-xl font-bold text-gray-900 mb-2">
-                등록 완료!
+                {t('registerSuccess')}
               </h2>
               <p className="text-sm text-gray-500">
-                아래 명령어로 에이전트를 연결하세요
+                {t('saveApiKey')}
               </p>
             </div>
 
             <div className="px-6 pb-6">
               {/* API Key */}
               <div className="bg-gray-900 rounded-xl p-4 mb-4">
-                <div className="text-xs text-gray-400 mb-2">연결 명령어</div>
+                <div className="text-xs text-gray-400 mb-2">API Key</div>
                 <code className="text-sm text-toss-blue break-all">
-                  /nexus connect {result.api_key}
+                  {result.api_key}
                 </code>
               </div>
 
               <div className="bg-warning-10 rounded-xl p-4 mb-4">
                 <div className="text-sm text-warning font-medium mb-1">
-                  ⚠️ API 키를 안전하게 보관하세요
-                </div>
-                <div className="text-xs text-gray-600">
-                  이 키는 다시 보여지지 않습니다
+                  {t('apiKeyWarning')}
                 </div>
               </div>
 
               <div className="flex gap-2">
                 <button
-                  onClick={() => copyToClipboard(`/nexus connect ${result.api_key}`)}
+                  onClick={() => copyToClipboard(result.api_key)}
                   className="toss-button toss-button-secondary flex-1"
                 >
-                  📋 복사
+                  {copied ? t('apiKeyCopied') : t('copyApiKey')}
                 </button>
                 <button
                   onClick={() => {
@@ -175,7 +192,7 @@ export function RegisterModal({ onClose, onSuccess }: RegisterModalProps) {
                   }}
                   className="toss-button toss-button-primary flex-1"
                 >
-                  완료
+                  {t('close')}
                 </button>
               </div>
             </div>
