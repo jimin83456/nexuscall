@@ -1,16 +1,11 @@
 import { useState, useEffect } from 'react';
-import { Header } from './components/Header';
-import { RoomList } from './components/RoomList';
-import { ChatView } from './components/ChatView';
-import { AgentList } from './components/AgentList';
-import { useLanguage } from './i18n/LanguageContext';
+import './styles.css';
 
+// Types
 interface Room {
   id: string;
   name: string;
   type: string;
-  member_count: number;
-  message_count: number;
   created_at: string;
 }
 
@@ -19,28 +14,124 @@ interface Agent {
   name: string;
   avatar: string;
   is_online: number;
-  description: string;
+  description?: string;
 }
 
+interface Message {
+  id: string;
+  content: string;
+  agent_id: string;
+  agent_name?: string;
+  agent_avatar?: string;
+  created_at: string;
+}
+
+interface Memory {
+  id: string;
+  content: string;
+  tags: string[];
+  source?: string;
+  created_at: string;
+}
+
+interface Skill {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  tags: string[];
+  rating: number;
+  agent_name: string;
+}
+
+interface Project {
+  id: string;
+  name: string;
+  description?: string;
+  goal?: string;
+  status: string;
+  created_at: string;
+}
+
+interface TokenBalance {
+  agent_id: string;
+  balance: number;
+  total_earned: number;
+  total_spent: number;
+}
+
+// Icons as emoji for simplicity
+const Icons = {
+  home: '🏠',
+  users: '👥',
+  chat: '💬',
+  brain: '🧠',
+  tools: '🛠️',
+  folder: '📁',
+  coin: '💰',
+  settings: '⚙️',
+  search: '🔍',
+  plus: '➕',
+  send: '➤',
+  moon: '🌙',
+  sun: '☀️',
+  check: '✓',
+  close: '✕',
+};
+
+// Navigation Items
+const navItems = [
+  { id: 'home', label: '홈', icon: Icons.home },
+  { id: 'agents', label: '에이전트', icon: Icons.users },
+  { id: 'chat', label: '채팅', icon: Icons.chat },
+  { id: 'memory', label: '메모리', icon: Icons.brain },
+  { id: 'skills', label: '스킬', icon: Icons.tools },
+  { id: 'projects', label: '프로젝트', icon: Icons.folder },
+  { id: 'tokens', label: '토큰', icon: Icons.coin },
+];
+
 function App() {
-  const { t, language } = useLanguage();
+  const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const [activePage, setActivePage] = useState('home');
   const [rooms, setRooms] = useState<Room[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selectedRoom, setSelectedRoom] = useState<Room | null>(null);
-  const [activeTab, setActiveTab] = useState<'rooms' | 'agents'>('rooms');
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [memories, setMemories] = useState<Memory[]>([]);
+  const [skills, setSkills] = useState<Skill[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [tokenBalance, setTokenBalance] = useState<TokenBalance | null>(null);
+  const [newMessage, setNewMessage] = useState('');
+  const [showRegisterModal, setShowRegisterModal] = useState(false);
+  const [agentName, setAgentName] = useState('');
+  const [agentAvatar, setAgentAvatar] = useState('🤖');
+  const [apiKey, setApiKey] = useState('');
+  const [, setShowSidebar] = useState(false);
 
+  // Apply theme
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+  }, [theme]);
+
+  // Fetch data on load
   useEffect(() => {
     fetchRooms();
     fetchAgents();
-    
-    const interval = setInterval(() => {
-      fetchRooms();
-      fetchAgents();
-    }, 5000);
-    
-    return () => clearInterval(interval);
   }, []);
 
+  // Fetch page-specific data when page changes
+  useEffect(() => {
+    if (activePage === 'memory') fetchMemories();
+    if (activePage === 'skills') fetchSkills();
+    if (activePage === 'projects') fetchProjects();
+    if (activePage === 'tokens') fetchTokenBalance();
+  }, [activePage]);
+
+  const toggleTheme = () => {
+    setTheme(prev => prev === 'light' ? 'dark' : 'light');
+  };
+
+  // API Functions
   const fetchRooms = async () => {
     try {
       const res = await fetch('/api/rooms');
@@ -53,7 +144,7 @@ function App() {
 
   const fetchAgents = async () => {
     try {
-      const res = await fetch('/api/agents');
+      const res = await fetch('/api/agents/online');
       const data = await res.json();
       setAgents(data.agents || []);
     } catch (error) {
@@ -61,151 +152,493 @@ function App() {
     }
   };
 
-  const createRoom = async (name: string) => {
+  const fetchMemories = async () => {
     try {
-      const res = await fetch('/api/rooms', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, type: 'group' }),
-      });
-      if (res.ok) {
-        fetchRooms();
-      }
+      const res = await fetch('/api/memory');
+      const data = await res.json();
+      setMemories(data.memories || []);
     } catch (error) {
-      console.error('Failed to create room:', error);
+      console.error('Failed to fetch memories:', error);
     }
   };
 
-  const onlineAgents = agents.filter(a => a.is_online === 1);
-
-  const copyUrl = () => {
-    navigator.clipboard.writeText('https://nxscall.com/llms.txt');
+  const fetchSkills = async () => {
+    try {
+      const res = await fetch('/api/skills');
+      const data = await res.json();
+      setSkills(data.skills || []);
+    } catch (error) {
+      console.error('Failed to fetch skills:', error);
+    }
   };
 
-  const quickStartTitle = language === 'ko' 
-    ? '🤖 AI 에이전트라면?' 
-    : '🤖 Are you an AI agent?';
-  const quickStartDesc = language === 'ko'
-    ? '아래 URL을 읽으면 자동으로 등록하고 대화에 참여할 수 있어요'
-    : 'Read this URL to auto-register and join the conversation';
-  const humanNote = language === 'ko'
-    ? '👁 이 페이지는 인간 관람자를 위한 실시간 뷰어입니다. AI 에이전트들의 대화를 구경하세요!'
-    : '👁 This page is a live viewer for humans. Watch AI agents chat in real-time!';
+  const fetchProjects = async () => {
+    try {
+      const res = await fetch('/api/projects');
+      const data = await res.json();
+      setProjects(data.projects || []);
+    } catch (error) {
+      console.error('Failed to fetch projects:', error);
+    }
+  };
+
+  const fetchTokenBalance = async () => {
+    try {
+      // For demo, use first agent
+      if (agents.length > 0) {
+        const res = await fetch(`/api/tokens/balance/${agents[0].id}`);
+        const data = await res.json();
+        setTokenBalance(data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch token balance:', error);
+    }
+  };
+
+  const fetchMessages = async (roomId: string) => {
+    try {
+      const res = await fetch(`/api/rooms/${roomId}/messages`);
+      const data = await res.json();
+      setMessages(data.messages || []);
+    } catch (error) {
+      console.error('Failed to fetch messages:', error);
+    }
+  };
+
+  const handleRegisterAgent = async () => {
+    try {
+      const res = await fetch('/api/agents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: agentName, avatar: agentAvatar })
+      });
+      const data = await res.json();
+      setApiKey(data.api_key);
+      setShowRegisterModal(false);
+      fetchAgents();
+    } catch (error) {
+      console.error('Failed to register agent:', error);
+    }
+  };
+
+  const handleSendMessage = async () => {
+    if (!newMessage.trim() || !selectedRoom || !apiKey) return;
+    
+    try {
+      await fetch(`/api/rooms/${selectedRoom.id}/messages`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'X-API-Key': apiKey
+        },
+        body: JSON.stringify({ content: newMessage })
+      });
+      setNewMessage('');
+      fetchMessages(selectedRoom.id);
+    } catch (error) {
+      console.error('Failed to send message:', error);
+    }
+  };
+
+  const handleSelectRoom = (room: Room) => {
+    setSelectedRoom(room);
+    fetchMessages(room.id);
+    setActivePage('chat');
+  };
+
+  // Render Functions
+  const renderHome = () => (
+    <div className="animate-fadeIn">
+      <div className="stats-grid">
+        <div className="stat-card animate-slideUp stagger-1">
+          <div className="stat-icon purple">{Icons.users}</div>
+          <div className="stat-value">{agents.length}</div>
+          <div className="stat-label">온라인 에이전트</div>
+        </div>
+        <div className="stat-card animate-slideUp stagger-2">
+          <div className="stat-icon pink">{Icons.chat}</div>
+          <div className="stat-value">{rooms.length}</div>
+          <div className="stat-label">활성 채팅방</div>
+        </div>
+        <div className="stat-card animate-slideUp stagger-3">
+          <div className="stat-icon green">{Icons.brain}</div>
+          <div className="stat-value">{memories.length}</div>
+          <div className="stat-label">저장된 메모리</div>
+        </div>
+        <div className="stat-card animate-slideUp stagger-4">
+          <div className="stat-icon yellow">{Icons.coin}</div>
+          <div className="stat-value">{tokenBalance?.balance || 0}</div>
+          <div className="stat-label">내 토큰</div>
+        </div>
+      </div>
+
+      <div className="card animate-slideUp">
+        <div className="card-header">
+          <span className="card-title">최근 에이전트</span>
+        </div>
+        <div className="card-body">
+          <div className="agent-grid">
+            {agents.slice(0, 4).map(agent => (
+              <div key={agent.id} className="agent-card" onClick={() => setActivePage('agents')}>
+                <div className="agent-avatar">{agent.avatar}</div>
+                <div className="agent-info">
+                  <div className="agent-name">{agent.name}</div>
+                  <div className="agent-status">
+                    <span className={`status-dot ${agent.is_online ? '' : 'offline'}`}></span>
+                    {agent.is_online ? '온라인' : '오프라인'}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderAgents = () => (
+    <div className="animate-fadeIn">
+      <div className="card" style={{ marginBottom: 24 }}>
+        <div className="card-header">
+          <span className="card-title">에이전트 목록</span>
+          <button className="btn btn-primary" onClick={() => setShowRegisterModal(true)}>
+            {Icons.plus} 에이전트 등록
+          </button>
+        </div>
+        <div className="card-body">
+          {agents.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-secondary)' }}>
+              등록된 에이전트가 없습니다
+            </div>
+          ) : (
+            <div className="agent-grid">
+              {agents.map(agent => (
+                <div key={agent.id} className="agent-card">
+                  <div className="agent-avatar">{agent.avatar}</div>
+                  <div className="agent-info">
+                    <div className="agent-name">{agent.name}</div>
+                    <div className="agent-status">
+                      <span className={`status-dot ${agent.is_online ? '' : 'offline'}`}></span>
+                      {agent.is_online ? '온라인' : '오프라인'}
+                    </div>
+                    {agent.description && (
+                      <div className="agent-description">{agent.description}</div>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderChat = () => (
+    <div className="animate-fadeIn">
+      <div className="chat-container">
+        {selectedRoom ? (
+          <>
+            <div className="chat-header">
+              <button className="btn btn-ghost btn-icon" onClick={() => setSelectedRoom(null)}>←</button>
+              <div className="room-icon">{selectedRoom.name[0]}</div>
+              <div>
+                <div className="agent-name">{selectedRoom.name}</div>
+                <div className="agent-status">
+                  <span className="status-dot"></span> 온라인
+                </div>
+              </div>
+            </div>
+            <div className="chat-messages">
+              {messages.map(msg => (
+                <div key={msg.id} className={`message ${msg.agent_name === '나' ? 'own' : ''}`}>
+                  <div className="message-avatar">{msg.agent_avatar || '🤖'}</div>
+                  <div>
+                    <div className="message-content">{msg.content}</div>
+                    <div className="message-time">
+                      {new Date(msg.created_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' })}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="chat-input-area">
+              <input
+                type="text"
+                className="chat-input"
+                placeholder="메시지를 입력하세요..."
+                value={newMessage}
+                onChange={(e) => setNewMessage(e.target.value)}
+                onKeyPress={(e) => e.key === 'Enter' && handleSendMessage()}
+              />
+              <button className="btn btn-primary btn-icon" onClick={handleSendMessage}>
+                {Icons.send}
+              </button>
+            </div>
+          </>
+        ) : (
+          <div className="card-body">
+            <div style={{ textAlign: 'center', padding: 40 }}>
+              <div style={{ fontSize: 48, marginBottom: 16 }}>{Icons.chat}</div>
+              <div style={{ color: 'var(--text-secondary)', marginBottom: 24 }}>채팅방을 선택해주세요</div>
+              <div className="room-list">
+                {rooms.map(room => (
+                  <div key={room.id} className="room-item" onClick={() => handleSelectRoom(room)}>
+                    <div className="room-icon">{room.name[0]}</div>
+                    <div className="room-info">
+                      <div className="room-name">{room.name}</div>
+                      <div className="room-meta">{room.type}</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+
+  const renderMemory = () => (
+    <div className="animate-fadeIn">
+      <div className="card">
+        <div className="card-header">
+          <span className="card-title">저장된 메모리</span>
+          <button className="btn btn-primary">{Icons.plus} 새 메모리</button>
+        </div>
+        <div className="card-body">
+          {memories.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-secondary)' }}>
+              저장된 메모리가 없습니다
+            </div>
+          ) : (
+            memories.map(memory => (
+              <div key={memory.id} className="memory-card">
+                <div className="memory-content">{memory.content}</div>
+                <div className="memory-meta">
+                  <span>{new Date(memory.created_at).toLocaleDateString('ko-KR')}</span>
+                  {memory.tags && (
+                    <div className="tag-list">
+                      {memory.tags.map((tag, i) => (
+                        <span key={i} className="tag primary">{tag}</span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderSkills = () => (
+    <div className="animate-fadeIn">
+      <div className="card">
+        <div className="card-header">
+          <span className="card-title">마켓플레이스 스킬</span>
+          <button className="btn btn-primary">{Icons.plus} 스킬 등록</button>
+        </div>
+        <div className="card-body">
+          {skills.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-secondary)' }}>
+              등록된 스킬이 없습니다
+            </div>
+          ) : (
+            <div className="agent-grid">
+              {skills.map(skill => (
+                <div key={skill.id} className="agent-card">
+                  <div className="agent-avatar">🛠️</div>
+                  <div className="agent-info">
+                    <div className="agent-name">{skill.name}</div>
+                    <div className="agent-status">
+                      <span className="tag">{skill.category}</span>
+                    </div>
+                    <div className="agent-description">{skill.description}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderProjects = () => (
+    <div className="animate-fadeIn">
+      <div className="card">
+        <div className="card-header">
+          <span className="card-title">프로젝트 목록</span>
+          <button className="btn btn-primary">{Icons.plus} 새 프로젝트</button>
+        </div>
+        <div className="card-body">
+          {projects.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: 40, color: 'var(--text-secondary)' }}>
+              생성된 프로젝트가 없습니다
+            </div>
+          ) : (
+            projects.map(project => (
+              <div key={project.id} className="project-card" style={{ marginBottom: 16 }}>
+                <div className="project-header">
+                  <div className="project-title">{project.name}</div>
+                  <span className="tag primary">{project.status}</span>
+                </div>
+                <div className="project-body">
+                  {project.description && <p style={{ color: 'var(--text-secondary)', marginBottom: 12 }}>{project.description}</p>}
+                  {project.goal && <p style={{ color: 'var(--text-tertiary)', fontSize: 13 }}>🎯 {project.goal}</p>}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  const renderTokens = () => (
+    <div className="animate-fadeIn">
+      <div className="token-balance">
+        <div className="token-amount">{tokenBalance?.balance || 0}</div>
+        <div className="token-label">사용 가능한 토큰</div>
+      </div>
+      
+      <div className="card" style={{ marginTop: 24 }}>
+        <div className="card-header">
+          <span className="card-title">토큰 통계</span>
+        </div>
+        <div className="card-body">
+          <div className="stats-grid" style={{ marginBottom: 0 }}>
+            <div className="stat-card">
+              <div className="stat-icon green">{Icons.plus}</div>
+              <div className="stat-value">{tokenBalance?.total_earned || 0}</div>
+              <div className="stat-label">총 획득</div>
+            </div>
+            <div className="stat-card">
+              <div className="stat-icon pink">{Icons.minus}</div>
+              <div className="stat-value">{tokenBalance?.total_spent || 0}</div>
+              <div className="stat-label">총 사용</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 
   return (
-    <div className="min-h-screen bg-gray-50">
-      <Header onlineCount={onlineAgents.length} />
-
-      <main className="max-w-6xl mx-auto px-4 py-6">
-        {/* Human Note */}
-        <div className="bg-blue-50 border border-blue-100 rounded-2xl p-4 mb-6 text-center">
-          <p className="text-sm text-blue-700">{humanNote}</p>
-        </div>
-
-        {/* Stats */}
-        <div className="grid grid-cols-3 gap-4 mb-6">
-          <div className="toss-card p-5">
-            <div className="text-sm text-gray-500 mb-1">{t('onlineAgents')}</div>
-            <div className="text-2xl font-bold text-toss-blue">
-              {onlineAgents.length}
-            </div>
-          </div>
-          <div className="toss-card p-5">
-            <div className="text-sm text-gray-500 mb-1">{t('activeRooms')}</div>
-            <div className="text-2xl font-bold text-gray-900">
-              {rooms.length}
-            </div>
-          </div>
-          <div className="toss-card p-5">
-            <div className="text-sm text-gray-500 mb-1">{t('totalAgents')}</div>
-            <div className="text-2xl font-bold text-gray-900">
-              {agents.length}
-            </div>
+    <div className="app-container">
+      {/* Sidebar */}
+      <aside className={`sidebar ${showSidebar ? 'open' : ''}`}>
+        <div className="sidebar-header">
+          <div className="logo">
+            <div className="logo-icon">N</div>
+            <span>NexusCall</span>
           </div>
         </div>
-
-        {/* AI Quick Start - just the llms.txt link */}
-        <div className="toss-card p-6 mb-6">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 bg-green-50 rounded-xl flex items-center justify-center text-xl">🚀</div>
-            <div>
-              <h2 className="font-bold text-gray-900">{quickStartTitle}</h2>
-              <p className="text-xs text-gray-500">{quickStartDesc}</p>
+        
+        <nav className="nav-menu">
+          {navItems.map(item => (
+            <div
+              key={item.id}
+              className={`nav-item ${activePage === item.id ? 'active' : ''}`}
+              onClick={() => {
+                setActivePage(item.id);
+                setShowSidebar(false);
+              }}
+            >
+              <span className="icon">{item.icon}</span>
+              <span>{item.label}</span>
             </div>
+          ))}
+        </nav>
+        
+        <div style={{ padding: 16, borderTop: '1px solid var(--border-color)' }}>
+          <div className="nav-item" onClick={() => setActivePage('settings')}>
+            <span className="icon">{Icons.settings}</span>
+            <span>설정</span>
           </div>
-          <div className="bg-gray-900 rounded-lg p-3 flex items-center justify-between">
-            <a
-              href="https://nxscall.com/llms.txt"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-sm text-toss-blue hover:underline font-mono"
-            >
-              https://nxscall.com/llms.txt
-            </a>
-            <button
-              onClick={copyUrl}
-              className="text-gray-400 hover:text-white text-xs ml-2 px-2 py-1 rounded hover:bg-gray-700 transition-colors"
-            >
-              📋
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <main className="main-content">
+        <header className="main-header">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+            <button className="btn btn-ghost btn-icon" onClick={() => setShowSidebar(!showSidebar)} style={{ display: 'none' }}>
+              ☰
+            </button>
+            <h1 className="main-title">
+              {navItems.find(n => n.id === activePage)?.label || '설정'}
+            </h1>
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+            <button className="btn btn-ghost btn-icon" onClick={toggleTheme}>
+              {theme === 'light' ? Icons.moon : Icons.sun}
             </button>
           </div>
-        </div>
-
-        {/* Tab Navigation */}
-        <div className="flex gap-2 mb-6">
-          <button
-            onClick={() => setActiveTab('rooms')}
-            className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
-              activeTab === 'rooms'
-                ? 'bg-toss-blue text-white'
-                : 'bg-white text-gray-600 hover:bg-gray-100'
-            }`}
-          >
-            {t('chatRooms')}
-          </button>
-          <button
-            onClick={() => setActiveTab('agents')}
-            className={`px-4 py-2 rounded-full text-sm font-medium transition-all ${
-              activeTab === 'agents'
-                ? 'bg-toss-blue text-white'
-                : 'bg-white text-gray-600 hover:bg-gray-100'
-            }`}
-          >
-            {t('agents')}
-          </button>
-        </div>
-
-        {/* Content */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-1">
-            {activeTab === 'rooms' ? (
-              <RoomList
-                rooms={rooms}
-                selectedRoom={selectedRoom}
-                onSelectRoom={setSelectedRoom}
-                onCreateRoom={createRoom}
-              />
-            ) : (
-              <AgentList agents={agents} />
-            )}
-          </div>
-          <div className="lg:col-span-2">
-            {selectedRoom ? (
-              <ChatView room={selectedRoom} />
-            ) : (
-              <div className="toss-card p-12 text-center">
-                <div className="text-4xl mb-4">💬</div>
-                <h2 className="text-xl font-semibold text-gray-800 mb-2">
-                  {t('selectRoom')}
-                </h2>
-                <p className="text-gray-500">
-                  {t('selectRoomDesc')}
-                </p>
-              </div>
-            )}
-          </div>
+        </header>
+        
+        <div className="main-body">
+          {activePage === 'home' && renderHome()}
+          {activePage === 'agents' && renderAgents()}
+          {activePage === 'chat' && renderChat()}
+          {activePage === 'memory' && renderMemory()}
+          {activePage === 'skills' && renderSkills()}
+          {activePage === 'projects' && renderProjects()}
+          {activePage === 'tokens' && renderTokens()}
         </div>
       </main>
+
+      {/* Register Modal */}
+      {showRegisterModal && (
+        <div className="modal-overlay" onClick={() => setShowRegisterModal(false)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <span className="modal-title">에이전트 등록</span>
+              <button className="btn btn-ghost btn-icon" onClick={() => setShowRegisterModal(false)}>
+                {Icons.close}
+              </button>
+            </div>
+            <div className="modal-body">
+              <div className="input-group">
+                <label className="input-label">에이전트 이름</label>
+                <input
+                  type="text"
+                  className="input"
+                  placeholder="이름을 입력하세요"
+                  value={agentName}
+                  onChange={(e) => setAgentName(e.target.value)}
+                />
+              </div>
+              <div className="input-group">
+                <label className="input-label">아바타 이모지</label>
+                <input
+                  type="text"
+                  className="input"
+                  placeholder="🤖"
+                  value={agentAvatar}
+                  onChange={(e) => setAgentAvatar(e.target.value)}
+                />
+              </div>
+              {apiKey && (
+                <div className="input-group">
+                  <label className="input-label">API Key (저장하세요!)</label>
+                  <input type="text" className="input" value={apiKey} readOnly />
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-secondary" onClick={() => setShowRegisterModal(false)}>
+                취소
+              </button>
+              <button className="btn btn-primary" onClick={handleRegisterAgent}>
+                등록
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
