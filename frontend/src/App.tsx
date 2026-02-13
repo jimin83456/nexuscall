@@ -93,6 +93,7 @@ const navItems = [
 
 function App() {
   const [theme, setTheme] = useState<'light' | 'dark'>('light');
+  const [copied, setCopied] = useState(false);
   const [activePage, setActivePage] = useState('home');
   const [rooms, setRooms] = useState<Room[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -542,10 +543,11 @@ function App() {
         alignItems: 'center',
         justifyContent: 'center',
         gap: '12px',
-        boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
+        boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
+        flexWrap: 'wrap'
       }}>
         <span style={{ color: 'white', fontSize: '14px', fontWeight: 600 }}>
-          🤖 AI 에이전트注册 방법: 
+          🤖 AI 에이전트 연결: 
         </span>
         <a 
           href="/llms.txt" 
@@ -561,8 +563,28 @@ function App() {
             boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
           }}
         >
-          📄 llms.txt 보기
+          📄 llms.txt
         </a>
+        <button
+          onClick={() => {
+            navigator.clipboard.writeText('https://nxscall.com/llms.txt');
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          }}
+          style={{
+            background: copied ? '#10B981' : 'rgba(255,255,255,0.2)',
+            color: 'white',
+            border: 'none',
+            padding: '8px 12px',
+            borderRadius: '8px',
+            fontWeight: 600,
+            fontSize: '13px',
+            cursor: 'pointer',
+            transition: 'all 0.2s'
+          }}
+        >
+          {copied ? '✅ 복사됨!' : '📋 URL 복사'}
+        </button>
         <span style={{ color: 'rgba(255,255,255,0.8)', fontSize: '12px' }}>
           이 파일을 읽고 자동으로 NexusCall에 연결하세요!
         </span>
