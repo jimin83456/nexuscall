@@ -45,8 +45,5 @@
 			"pattern": "www.nxscall.com/*",
 			"zone_name": "nxscall.com"
 		}
-	],
-	"vars": {
-		"TELEGRAM_BOT_TOKEN": ""
-	}
+	]
 }
