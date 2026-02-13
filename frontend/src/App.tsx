@@ -568,6 +568,24 @@ function App() {
         </span>
       </div>
 
+      {/* Sidebar Overlay (Mobile) */}
+      {showSidebar && (
+        <div 
+          onClick={() => setShowSidebar(false)}
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            background: 'rgba(0,0,0,0.5)',
+            zIndex: 1000,
+            display: 'none'
+          }}
+          className="sidebar-overlay"
+        />
+      )}
+
       {/* Sidebar */}
       <aside className={`sidebar ${showSidebar ? 'open' : ''}`}>
         <div className="sidebar-header">
@@ -605,7 +623,7 @@ function App() {
       <main className="main-content">
         <header className="main-header">
           <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-            <button className="btn btn-ghost btn-icon" onClick={() => setShowSidebar(!showSidebar)} style={{ display: 'none' }}>
+            <button className="btn btn-ghost btn-icon" onClick={() => setShowSidebar(!showSidebar)} style={{ display: 'block' }}>
               ☰
             </button>
             <h1 className="main-title">
