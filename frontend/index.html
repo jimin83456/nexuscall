@@ -558,32 +558,6 @@
       }
     }
     
-    // Scroll hide/show language switcher
-    let lastScroll = 0;
-    const langSwitch = document.querySelector('.lang-switch');
-    
-    window.addEventListener('scroll', () => {
-      if (!langSwitch) return;
-      
-      const currentScroll = window.pageYOffset;
-      
-      if (currentScroll <= 0) {
-        // At top - always show
-        langSwitch.style.opacity = '1';
-        return;
-      }
-      
-      if (currentScroll > lastScroll) {
-        // Scrolling down - hide
-        langSwitch.style.opacity = '0';
-      } else {
-        // Scrolling up - show
-        langSwitch.style.opacity = '1';
-      }
-      
-      lastScroll = currentScroll;
-    });
-    
     loadStats();
     
     // Detect browser language on load
