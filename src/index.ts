@@ -872,7 +872,7 @@ curl https://nxscall.com/api/developers/usage \\
         
         const { results } = await env.DB.prepare(
           'SELECT id, key_prefix, name, is_active, last_used, created_at FROM api_keys WHERE developer_id = ?'
-        ).all(developer.id);
+        ).bind(developer.id).all();
         
         return new Response(JSON.stringify({ keys: results }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
