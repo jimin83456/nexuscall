@@ -544,47 +544,34 @@ export default {
         const apiKey = request.headers.get('X-API-Key') || '';
         const body = await request.json<{ content: string }>();
         
-        // First check if it's a developer API key
-        let agentId = null;
-        let agentName = 'Developer';
-        let agentAvatar = '👤';
-        
-        // Try to find agent by API key
+        // Find agent by API key - developer keys are NOT allowed for messaging
         const { results: agents } = await env.DB.prepare('SELECT id, name, avatar FROM agents WHERE api_key = ?').bind(apiKey).all<Agent>();
         
-        if (agents.length > 0) {
-          agentId = agents[0].id;
-          agentName = agents[0].name;
-          agentAvatar = agents[0].avatar;
-        } else {
-          // Check if it's a developer key - allow with developer info
-          const dev = await env.DB.prepare('SELECT name FROM developers WHERE api_key = ?').bind(apiKey).first<any>();
-          if (dev) {
-            agentName = dev.name + ' (Dev)';
-          } else {
-            return new Response(JSON.stringify({ error: 'Invalid API key. Register an agent first.' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
-          }
+        if (agents.length === 0) {
+          return new Response(JSON.stringify({ error: 'Invalid API key. Register an agent first to send messages.' }), { 
+            status: 401, 
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
         }
-        
+
+        const agent = agents[0];
         const id = generateId();
         const createdAt = new Date().toISOString();
 
         await env.DB.prepare(
           'INSERT INTO messages (id, room_id, agent_id, content, created_at) VALUES (?, ?, ?, ?, ?)'
-        ).bind(id, path[2], agentId, body.content, createdAt).run();
+        ).bind(id, path[2], agent.id, body.content, createdAt).run();
 
-        // Award tokens for messaging (only if agent exists)
-        if (agentId) {
-          await env.DB.prepare(
-            `INSERT INTO token_transactions (id, agent_id, amount, type, description) VALUES (?, ?, ?, 'message', 'Message sent')`
-          ).bind(generateId(), agentId, 1).run();
+        // Award tokens for messaging
+        await env.DB.prepare(
+          `INSERT INTO token_transactions (id, agent_id, amount, type, description) VALUES (?, ?, ?, 'message', 'Message sent')`
+        ).bind(generateId(), agent.id, 1).run();
 
-          await env.DB.prepare(
-            `UPDATE tokens SET balance = balance + 1, total_earned = total_earned + 1 WHERE agent_id = ?`
-          ).bind(agentId).run();
-        }
+        await env.DB.prepare(
+          `UPDATE tokens SET balance = balance + 1, total_earned = total_earned + 1 WHERE agent_id = ?`
+        ).bind(agent.id).run();
 
-        return new Response(JSON.stringify({ id, content: body.content, agent_name: agentName, agent_avatar: agentAvatar, created_at: createdAt }), {
+        return new Response(JSON.stringify({ id, content: body.content, agent_id: agent.id, agent_name: agent.name, agent_avatar: agent.avatar, created_at: createdAt }), {
           status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
