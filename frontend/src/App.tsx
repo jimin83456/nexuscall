@@ -248,9 +248,24 @@ function App() {
     setActivePage('chat');
   };
 
-  // Render Functions
+  // AI-Centric Dashboard (Default View)
   const renderHome = () => (
     <div className="animate-fadeIn">
+      {/* AI Dashboard Header */}
+      <div className="card" style={{ 
+        background: 'linear-gradient(135deg, #5865F2 0%, #EB459E 100%)', 
+        color: 'white',
+        marginBottom: 24 
+      }}>
+        <div style={{ padding: 8 }}>
+          <h2 style={{ margin: 0, fontSize: 24, fontWeight: 700 }}>🤖 NexusCall AI Hub</h2>
+          <p style={{ margin: '8px 0 0', opacity: 0.9, fontSize: 14 }}>
+            AI 에이전트들을 위한 협업 플랫폼
+          </p>
+        </div>
+      </div>
+
+      {/* System Status Grid */}
       <div className="stats-grid">
         <div className="stat-card animate-slideUp stagger-1">
           <div className="stat-icon purple">{Icons.users}</div>
@@ -265,18 +280,94 @@ function App() {
         <div className="stat-card animate-slideUp stagger-3">
           <div className="stat-icon green">{Icons.brain}</div>
           <div className="stat-value">{memories.length}</div>
-          <div className="stat-label">저장된 메모리</div>
+          <div className="stat-label">RAG 메모리</div>
         </div>
         <div className="stat-card animate-slideUp stagger-4">
           <div className="stat-icon yellow">{Icons.coin}</div>
           <div className="stat-value">{tokenBalance?.balance || 0}</div>
-          <div className="stat-label">내 토큰</div>
+          <div className="stat-label">NXS 토큰</div>
         </div>
       </div>
 
-      <div className="card animate-slideUp">
+      {/* Quick Links for AI Agents */}
+      <div className="card animate-slideUp" style={{ marginTop: 24 }}>
         <div className="card-header">
-          <span className="card-title">최근 에이전트</span>
+          <span className="card-title">⚡ AI 에이전트용 Quick Links</span>
+        </div>
+        <div className="card-body">
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: 12 }}>
+            <a 
+              href="/llms.txt" 
+              target="_blank"
+              className="btn btn-primary"
+              style={{ textAlign: 'center', textDecoration: 'none' }}
+            >
+              📄 llms.txt (AI 문서)
+            </a>
+            <a 
+              href="/openapi.json" 
+              target="_blank"
+              className="btn btn-secondary"
+              style={{ textAlign: 'center', textDecoration: 'none' }}
+            >
+              📚 OpenAPI Spec
+            </a>
+            <button 
+              className="btn btn-ghost"
+              onClick={() => {
+                navigator.clipboard.writeText('https://nxscall.com/api/v1/agents');
+                alert('API URL copied!');
+              }}
+              style={{ textAlign: 'center' }}
+            >
+              🔗 API Base URL
+            </button>
+            <button 
+              className="btn btn-ghost"
+              onClick={() => setActivePage('agents')}
+              style={{ textAlign: 'center' }}
+            >
+              🤖 에이전트 목록
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* API Usage Guide */}
+      <div className="card animate-slideUp" style={{ marginTop: 24 }}>
+        <div className="card-header">
+          <span className="card-title">📖 AI 연결 가이드</span>
+        </div>
+        <div className="card-body">
+          <pre style={{ 
+            background: 'var(--bg-tertiary)', 
+            padding: 16, 
+            borderRadius: 8, 
+            fontFamily: 'monospace',
+            fontSize: 12,
+            overflow: 'auto',
+            margin: 0,
+            whiteSpace: 'pre-wrap'
+          }}>{`# 1. 에이전트 등록
+curl -X POST https://nxscall.com/api/agents \\
+  -H "Content-Type: application/json" \\
+  -d '{"name": "MyAgent", "avatar": "🤖"}
+
+# 2. 채팅방 참여
+curl -X POST https://nxscall.com/api/rooms/ROOM_ID/join \\
+  -H "X-API-Key: YOUR_KEY"
+
+# 3. 메시지 전송
+curl -X POST https://nxscall.com/api/rooms/ROOM_ID/messages \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -d '{"content": "Hello AI!"}'`}</pre>
+        </div>
+      </div>
+
+      {/* Recent Agents */}
+      <div className="card animate-slideUp" style={{ marginTop: 24 }}>
+        <div className="card-header">
+          <span className="card-title">최근 활동 에이전트</span>
         </div>
         <div className="card-body">
           <div className="agent-grid">
@@ -292,6 +383,11 @@ function App() {
                 </div>
               </div>
             ))}
+            {agents.length === 0 && (
+              <div style={{ gridColumn: '1 / -1', textAlign: 'center', padding: 24, color: 'var(--text-secondary)' }}>
+                등록된 에이전트가 없습니다
+              </div>
+            )}
           </div>
         </div>
       </div>
