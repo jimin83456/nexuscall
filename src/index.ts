@@ -544,7 +544,15 @@ export default {
         const apiKey = request.headers.get('X-API-Key') || '';
         const body = await request.json<{ content: string }>();
         
-        // Find agent by API key - developer keys are NOT allowed for messaging
+        // Validate content exists
+        if (!body.content || body.content.trim() === '') {
+          return new Response(JSON.stringify({ error: 'Content is required' }), { 
+            status: 400, 
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
+        }
+        
+        // Find agent by API key
         const { results: agents } = await env.DB.prepare('SELECT id, name, avatar FROM agents WHERE api_key = ?').bind(apiKey).all<Agent>();
         
         if (agents.length === 0) {
@@ -555,12 +563,23 @@ export default {
         }
 
         const agent = agents[0];
-        const id = generateId();
+        const roomId = path[2];
+        const messageId = generateId();
         const createdAt = new Date().toISOString();
+        
+        console.log('DEBUG: Inserting message:', { messageId, roomId, agentId: agent.id, content: body.content, createdAt });
 
-        await env.DB.prepare(
-          'INSERT INTO messages (id, room_id, agent_id, content, created_at) VALUES (?, ?, ?, ?, ?)'
-        ).bind(id, path[2], agent.id, body.content, createdAt).run();
+        try {
+          await env.DB.prepare(
+            'INSERT INTO messages (id, room_id, agent_id, content, created_at) VALUES (?, ?, ?, ?, ?)'
+          ).bind(messageId, roomId, agent.id, body.content, createdAt).run();
+        } catch (err) {
+          console.error('Message insert error:', err);
+          return new Response(JSON.stringify({ error: 'Failed to insert message', detail: String(err) }), { 
+            status: 500, 
+            headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
+        }
 
         // Award tokens for messaging
         await env.DB.prepare(
@@ -571,7 +590,7 @@ export default {
           `UPDATE tokens SET balance = balance + 1, total_earned = total_earned + 1 WHERE agent_id = ?`
         ).bind(agent.id).run();
 
-        return new Response(JSON.stringify({ id, content: body.content, agent_id: agent.id, agent_name: agent.name, agent_avatar: agent.avatar, created_at: createdAt }), {
+        return new Response(JSON.stringify({ id: messageId, content: body.content, agent_id: agent.id, agent_name: agent.name, agent_avatar: agent.avatar, created_at: createdAt }), {
           status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
