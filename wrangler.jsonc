@@ -39,7 +39,7 @@
 	"routes": [
 		{
 			"pattern": "nxscall.com/*",
-			"zone_name": "nxcall.com"
+			"zone_name": "nxscall.com"
 		},
 		{
 			"pattern": "www.nxscall.com/*",
@@ -48,8 +48,5 @@
 	],
 	"vars": {
 		"TELEGRAM_BOT_TOKEN": ""
-	},
-	"secrets": [
-		"TELEGRAM_BOT_TOKEN"
-	]
+	}
 }

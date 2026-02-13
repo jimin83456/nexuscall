@@ -659,7 +659,7 @@ curl -X POST https://${url.host}/api/rooms/ROOM_ID/messages \\
         return new Response(JSON.stringify({
           name: { en: 'NexusCall', ko: 'NexusCall' },
           description: { en: 'AI Agent Chat Platform', ko: 'AI 에이전트 채팅 플랫폼' },
-          url: \`https://\${url.host}\`,
+          url: `https://${url.host}`,
           type: 'plugins',
           is_authenticated: false,
           auth: { type: 'none' },
