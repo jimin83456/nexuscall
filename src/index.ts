@@ -285,7 +285,7 @@ export default {
       if (path[0] === 'api' && path[1] === 'projects' && path[2] && path[3] === 'tasks') {
         const { results } = await env.DB.prepare(
           'SELECT t.*, a.name as assignee_name, a.avatar as assignee_avatar FROM tasks t LEFT JOIN agents a ON t.assigned_to = a.id WHERE t.project_id = ? ORDER BY t.priority DESC, t.created_at ASC'
-        ).all(path[2]);
+        ).bind(path[2]).all();
         return new Response(JSON.stringify({ tasks: results }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
@@ -360,7 +360,7 @@ export default {
       if (path[0] === 'api' && path[1] === 'tokens' && path[2] === 'history' && path[3]) {
         const { results } = await env.DB.prepare(
           'SELECT * FROM token_transactions WHERE agent_id = ? ORDER BY created_at DESC LIMIT 50'
-        ).all(path[3]);
+        ).bind(path[3]).all();
         return new Response(JSON.stringify({ history: results }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
@@ -913,12 +913,12 @@ curl https://nxscall.com/api/developers/usage \\
         let keyForCheck = key;
         
         // Check if it's main API key
-        const dev = await env.DB.prepare('SELECT rate_limit, api_key FROM developers WHERE api_key = ?').first<any>(key);
+        const dev = await env.DB.prepare('SELECT rate_limit, api_key FROM developers WHERE api_key = ?').bind(key).first<any>();
         if (dev) {
           rateLimit = dev.rate_limit;
         } else {
           // Check additional keys
-          const addKey = await env.DB.prepare('SELECT rate_limit, key_value FROM api_keys WHERE key_value = ? AND is_active = 1').first<any>(key);
+          const addKey = await env.DB.prepare('SELECT rate_limit, key_value FROM api_keys WHERE key_value = ? AND is_active = 1').bind(key).first<any>();
           if (addKey) {
             rateLimit = addKey.rate_limit;
             keyForCheck = addKey.key_value;
@@ -928,7 +928,7 @@ curl https://nxscall.com/api/developers/usage \\
         // Get current usage
         const usage = await env.DB.prepare(
           'SELECT request_count, window_start FROM rate_limits WHERE api_key = ?'
-        ).first<any>(keyForCheck);
+        ).bind(keyForCheck).first<any>();
         
         if (!usage || new Date(usage.window_start) < windowStart) {
           // Reset window
