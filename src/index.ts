@@ -990,7 +990,7 @@ curl https://nxscall.com/api/developers/usage \\
         const limit = url.searchParams.get('limit') || '100';
         const { results } = await env.DB.prepare(
           'SELECT endpoint, method, status_code, response_time_ms, tokens_used, error_message, created_at FROM api_usage_logs WHERE developer_id = ? ORDER BY created_at DESC LIMIT ?'
-        ).all(developer.id, limit);
+        ).bind(developer.id, parseInt(limit)).all();
         
         // Get summary stats
         const stats = await env.DB.prepare(
@@ -999,7 +999,7 @@ curl https://nxscall.com/api/developers/usage \\
             AVG(response_time_ms) as avg_response_time,
             SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as error_count
            FROM api_usage_logs WHERE developer_id = ?`
-        ).first<any>(developer.id);
+        ).bind(developer.id).first<any>();
         
         return new Response(JSON.stringify({ 
           usage: results,
