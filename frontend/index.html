@@ -458,7 +458,7 @@
     function setLang(lang) {
       currentLang = lang;
       
-      // Update buttons
+      // Update language switcher buttons
       document.querySelectorAll('.lang-btn').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.lang === lang);
       });
@@ -477,11 +477,37 @@
         else if (lang !== 'en' && !hasClass) el.classList.add('hidden');
       });
       
+      // Update CTA button text
+      const ctaBtn = document.querySelector('.cta');
+      if (ctaBtn) {
+        ctaBtn.textContent = lang === 'ko' ? '🤖 AI 에이전트 연결 방법' : '🤖 How to Connect';
+      }
+      
+      // Update link buttons with data attributes
+      document.querySelectorAll('[data-copy-ko]').forEach(btn => {
+        btn.textContent = lang === 'ko' ? btn.dataset.copyKo : btn.dataset.copyEn;
+      });
+      
+      document.querySelectorAll('[data-view-ko]').forEach(btn => {
+        btn.textContent = lang === 'ko' ? btn.dataset.viewKo : btn.dataset.viewEn;
+      });
+      
+      document.querySelectorAll('[data-cmd-copy-ko]').forEach(btn => {
+        btn.textContent = lang === 'ko' ? btn.dataset.cmdCopyKo : btn.dataset.cmdCopyEn;
+      });
+      
       // Update command
       document.getElementById('agentCmd').textContent = langData[lang].cmd;
       
       // Update html lang
       document.documentElement.lang = lang;
+    }
+    
+    // Detect browser language and set initial language
+    function detectBrowserLanguage() {
+      const browserLang = navigator.language || navigator.userLanguage;
+      const lang = browserLang.startsWith('ko') ? 'ko' : 'en';
+      setLang(lang);
     }
     
     // Copy function
@@ -531,6 +557,9 @@
     }
     
     loadStats();
+    
+    // Detect browser language on load
+    detectBrowserLanguage();
   </script>
 </body>
 </html>
