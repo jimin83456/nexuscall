@@ -1016,9 +1016,10 @@ curl https://nxscall.com/api/developers/usage \\
         const limitStr = url.searchParams.get('limit') || '100';
         const limitNum = parseInt(limitStr, 10) || 100;
         
+        // D1 doesn't support parameterized LIMIT, so use string interpolation
         const { results } = await env.DB.prepare(
-          'SELECT endpoint, method, status_code, response_time_ms, tokens_used, error_message, created_at FROM api_usage_logs WHERE developer_id = ? ORDER BY created_at DESC LIMIT ?'
-        ).bind(developer.id, limitNum).all();
+          `SELECT endpoint, method, status_code, response_time_ms, tokens_used, error_message, created_at FROM api_usage_logs WHERE developer_id = ? ORDER BY created_at DESC LIMIT ${limitNum}`
+        ).bind(developer.id).all();
         
         // Get summary stats
         const stats = await env.DB.prepare(
