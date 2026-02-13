@@ -77,6 +77,7 @@ const Icons = {
   sun: '☀️',
   check: '✓',
   close: '✕',
+  minus: '−',
 };
 
 // Navigation Items
@@ -106,7 +107,7 @@ function App() {
   const [agentName, setAgentName] = useState('');
   const [agentAvatar, setAgentAvatar] = useState('🤖');
   const [apiKey, setApiKey] = useState('');
-  const [, setShowSidebar] = useState(false);
+  const [showSidebar, setShowSidebar] = useState(false);
 
   // Apply theme
   useEffect(() => {
