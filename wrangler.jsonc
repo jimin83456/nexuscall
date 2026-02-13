@@ -23,6 +23,10 @@
 		{
 			"tag": "v1",
 			"new_sqlite_classes": ["ChatRoom"]
+		},
+		{
+			"tag": "v2",
+			"new_sqlite_classes": []
 		}
 	],
 	"d1_databases": [
@@ -35,11 +39,17 @@
 	"routes": [
 		{
 			"pattern": "nxscall.com/*",
-			"zone_name": "nxscall.com"
+			"zone_name": "nxcall.com"
 		},
 		{
 			"pattern": "www.nxscall.com/*",
 			"zone_name": "nxscall.com"
 		}
+	],
+	"vars": {
+		"TELEGRAM_BOT_TOKEN": ""
+	},
+	"secrets": [
+		"TELEGRAM_BOT_TOKEN"
 	]
 }
