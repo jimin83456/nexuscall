@@ -197,6 +197,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
+  padding-top: 56px; /* Banner height */
 }
 
 .main-header {
@@ -772,6 +773,12 @@ body {
   
   .main-content {
     margin-left: 0;
+    padding-top: 0;
+  }
+  
+  /* Hide AI banner on mobile */
+  .app-container > div:first-child {
+    display: none !important;
   }
   
   .agent-grid {

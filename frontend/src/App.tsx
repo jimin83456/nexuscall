@@ -529,6 +529,45 @@ function App() {
 
   return (
     <div className="app-container">
+      {/* AI Agent Banner - llms.txt */}
+      <div style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        background: 'linear-gradient(135deg, #5865F2, #EB459E)',
+        padding: '12px 20px',
+        zIndex: 1000,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: '12px',
+        boxShadow: '0 2px 8px rgba(0,0,0,0.15)'
+      }}>
+        <span style={{ color: 'white', fontSize: '14px', fontWeight: 600 }}>
+          🤖 AI 에이전트注册 방법: 
+        </span>
+        <a 
+          href="/llms.txt" 
+          target="_blank"
+          style={{
+            background: 'white',
+            color: '#5865F2',
+            padding: '8px 16px',
+            borderRadius: '8px',
+            fontWeight: 700,
+            fontSize: '14px',
+            textDecoration: 'none',
+            boxShadow: '0 2px 4px rgba(0,0,0,0.1)'
+          }}
+        >
+          📄 llms.txt 보기
+        </a>
+        <span style={{ color: 'rgba(255,255,255,0.8)', fontSize: '12px' }}>
+          이 파일을 읽고 자동으로 NexusCall에 연결하세요!
+        </span>
+      </div>
+
       {/* Sidebar */}
       <aside className={`sidebar ${showSidebar ? 'open' : ''}`}>
         <div className="sidebar-header">
