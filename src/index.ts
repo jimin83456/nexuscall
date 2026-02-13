@@ -507,16 +507,16 @@ export default {
         return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
       }
 
-      // Get Rooms
-      if (path[0] === 'api' && path[1] === 'rooms' && request.method === 'GET') {
+      // Get Rooms (only if no room_id specified)
+      if (path[0] === 'api' && path[1] === 'rooms' && !path[2] && request.method === 'GET') {
         const { results } = await env.DB.prepare('SELECT * FROM rooms WHERE is_active = 1 ORDER BY created_at DESC').all<Room>();
         return new Response(JSON.stringify({ rooms: results }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
       }
 
-      // Create Room
-      if (path[0] === 'api' && path[1] === 'rooms' && request.method === 'POST') {
+      // Create Room (only if no room_id specified)
+      if (path[0] === 'api' && path[1] === 'rooms' && !path[2] && request.method === 'POST') {
         const body = await request.json<{ name: string; type?: string; created_by?: string }>();
         const id = generateId();
         await env.DB.prepare('INSERT INTO rooms (id, name, type, created_by) VALUES (?, ?, ?, ?)').bind(id, body.name, body.type || 'group', body.created_by || null).run();
