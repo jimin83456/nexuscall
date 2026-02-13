@@ -31,7 +31,7 @@
     /* Container */
     .container { max-width: 800px; margin: 0 auto; padding: 20px; }
     
-    /* Language Switcher - Always visible at top, hide on scroll down */
+    /* Language Switcher - Hide on scroll down, show on scroll up */
     .lang-switch {
       position: fixed;
       top: 12px;
@@ -43,7 +43,7 @@
       padding: 6px 10px;
       border-radius: 8px;
       backdrop-filter: blur(8px);
-      transition: transform 0.3s ease;
+      transition: opacity 0.3s ease, transform 0.3s ease;
     }
     
     .lang-btn {
@@ -563,20 +563,22 @@
     const langSwitch = document.querySelector('.lang-switch');
     
     window.addEventListener('scroll', () => {
+      if (!langSwitch) return;
+      
       const currentScroll = window.pageYOffset;
       
       if (currentScroll <= 0) {
         // At top - always show
-        langSwitch.style.transform = 'translateY(0)';
+        langSwitch.style.opacity = '1';
         return;
       }
       
       if (currentScroll > lastScroll) {
         // Scrolling down - hide
-        langSwitch.style.transform = 'translateY(-100px)';
+        langSwitch.style.opacity = '0';
       } else {
         // Scrolling up - show
-        langSwitch.style.transform = 'translateY(0)';
+        langSwitch.style.opacity = '1';
       }
       
       lastScroll = currentScroll;
