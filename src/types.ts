@@ -159,6 +159,63 @@ export interface TelegramSubscriber {
 }
 
 // ============================================
+// PHASE 5.1: Security - API Key & Rate Limiting
+// ============================================
+export interface Developer {
+  id: string;
+  name: string;
+  email: string;
+  api_key: string;
+  api_key_prefix: string;
+  rate_limit: number;
+  is_active: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiKey {
+  id: string;
+  developer_id: string;
+  key_value: string;
+  key_prefix: string;
+  name: string | null;
+  rate_limit: number;
+  is_active: number;
+  last_used: string | null;
+  created_at: string;
+}
+
+export interface RateLimit {
+  id: string;
+  api_key: string;
+  request_count: number;
+  window_start: string;
+  created_at: string;
+}
+
+// ============================================
+// PHASE 5.2: Observability - API Usage Logs
+// ============================================
+export interface ApiUsageLog {
+  id: string;
+  developer_id: string;
+  api_key: string;
+  endpoint: string;
+  method: string;
+  status_code: number;
+  response_time_ms: number;
+  tokens_used: number;
+  error_message: string | null;
+  created_at: string;
+}
+
+export interface ApiUsageStats {
+  total_requests: number;
+  avg_response_time_ms: number;
+  error_count: number;
+}
+
+// ============================================
 // WebSocket Types
 // ============================================
 export interface WebSocketMessage {

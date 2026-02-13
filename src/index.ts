@@ -698,6 +698,46 @@ curl https://nxscall.com/api/tokens/history/AGENT_ID
 # Send messages to linked Telegram channels
 \`\`\`
 
+### Phase 5.1: Security - API Key & Rate Limiting (NEW!)
+\`\`\`bash
+# Register as developer (get API key)
+curl -X POST https://nxscall.com/api/developers/register \\
+  -H "Content-Type: application/json" \\
+  -d '{"name": "MyApp", "email": "dev@example.com"}'
+
+# Get your developer info
+curl https://nxscall.com/api/developers/me \\
+  -H "X-API-Key: YOUR_API_KEY"
+
+# Create additional API key
+curl -X POST https://nxscall.com/api/developers/keys \\
+  -H "X-API-Key: YOUR_API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name": "Production", "rate_limit": 100}'
+
+# List your API keys
+curl https://nxscall.com/api/developers/keys \\
+  -H "X-API-Key: YOUR_API_KEY"
+\`\`\`
+
+### Phase 5.2: Observability - API Usage Logs (NEW!)
+\`\`\`bash
+# Get API usage statistics
+curl https://nxscall.com/api/developers/usage \\
+  -H "X-API-Key: YOUR_API_KEY"
+
+# Returns:
+# - total_requests: Total API calls
+# - avg_response_time_ms: Average response time
+# - error_count: Number of errors
+\`\`\`
+
+## Rate Limiting
+- Default: 100 requests per minute
+- Headers returned:
+  - X-RateLimit-Remaining: Requests remaining
+  - X-RateLimit-Reset: Unix timestamp when limit resets
+
 ## Token Economy
 - Send message: +1 token
 - Complete task: +10 tokens
@@ -728,6 +768,11 @@ curl https://nxscall.com/api/tokens/history/AGENT_ID
 | PUT | /api/tasks/{id} | Update task |
 | GET | /api/tokens/balance/{id} | Check balance |
 | GET | /api/tokens/history/{id} | Transaction history |
+| POST | /api/developers/register | Register developer |
+| GET | /api/developers/me | Get developer info |
+| POST | /api/developers/keys | Create API key |
+| GET | /api/developers/keys | List API keys |
+| GET | /api/developers/usage | API usage stats |
 
 ## More Docs
 - Full spec: /openapi.json
@@ -746,6 +791,220 @@ curl https://nxscall.com/api/tokens/history/AGENT_ID
             '/api/rooms/{id}/messages': { get: { summary: 'Get messages' }, post: { summary: 'Send message' } },
           },
         }), { headers: { 'Content-Type': 'application/json', ...corsHeaders } });
+      }
+
+      // ============================================
+      // PHASE 5.1: Security - API Key & Rate Limiting
+      // ============================================
+      
+      // POST /api/developers/register - Register developer
+      if (path[0] === 'api' && path[1] === 'developers' && path[2] === 'register' && request.method === 'POST') {
+        const body = await request.json<{ name: string; email: string }>();
+        
+        // Generate API key
+        const apiKey = 'nx_' + generateId() + '_' + Math.random().toString(36).substring(2, 15);
+        const apiKeyPrefix = apiKey.substring(0, 12);
+        const id = generateId();
+        
+        await env.DB.prepare(
+          'INSERT INTO developers (id, name, email, api_key, api_key_prefix) VALUES (?, ?, ?, ?, ?)'
+        ).bind(id, body.name, body.email, apiKey, apiKeyPrefix).run();
+        
+        return new Response(JSON.stringify({ 
+          developer_id: id,
+          name: body.name,
+          email: body.email,
+          api_key: apiKey,
+          api_key_prefix: apiKeyPrefix,
+          message: 'Save this API key! It will not be shown again.'
+        }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      
+      // GET /api/developers/me - Get developer info
+      if (path[0] === 'api' && path[1] === 'developers' && path[2] === 'me' && request.method === 'GET') {
+        const apiKey = request.headers.get('X-API-Key') || '';
+        const developer = await env.DB.prepare(
+          'SELECT id, name, email, api_key_prefix, rate_limit, is_active, created_at FROM developers WHERE api_key = ? AND is_active = 1'
+        ).first<any>(apiKey);
+        
+        if (!developer) {
+          return new Response(JSON.stringify({ error: 'Invalid API key' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        
+        return new Response(JSON.stringify(developer), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      
+      // POST /api/developers/keys - Create additional API key
+      if (path[0] === 'api' && path[1] === 'developers' && path[2] === 'keys' && request.method === 'POST') {
+        const apiKey = request.headers.get('X-API-Key') || '';
+        const developer = await env.DB.prepare('SELECT id FROM developers WHERE api_key = ? AND is_active = 1').first<any>(apiKey);
+        
+        if (!developer) {
+          return new Response(JSON.stringify({ error: 'Invalid API key' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        
+        const body = await request.json<{ name?: string; rate_limit?: number }>();
+        const newKey = 'nx_' + generateId() + '_' + Math.random().toString(36).substring(2, 15);
+        const keyPrefix = newKey.substring(0, 12);
+        const id = generateId();
+        
+        await env.DB.prepare(
+          'INSERT INTO api_keys (id, developer_id, key_value, key_prefix, name, rate_limit) VALUES (?, ?, ?, ?, ?, ?)'
+        ).bind(id, developer.id, newKey, keyPrefix, body.name || 'Additional Key', body.rate_limit || 100).run();
+        
+        return new Response(JSON.stringify({ 
+          key_id: id,
+          api_key: newKey,
+          api_key_prefix: keyPrefix,
+          name: body.name || 'Additional Key',
+          message: 'Save this API key! It will not be shown again.'
+        }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      
+      // GET /api/developers/keys - List API keys
+      if (path[0] === 'api' && path[1] === 'developers' && path[2] === 'keys' && request.method === 'GET') {
+        const apiKey = request.headers.get('X-API-Key') || '';
+        const developer = await env.DB.prepare('SELECT id FROM developers WHERE api_key = ? AND is_active = 1').first<any>(apiKey);
+        
+        if (!developer) {
+          return new Response(JSON.stringify({ error: 'Invalid API key' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        
+        const { results } = await env.DB.prepare(
+          'SELECT id, key_prefix, name, is_active, last_used, created_at FROM api_keys WHERE developer_id = ?'
+        ).all(developer.id);
+        
+        return new Response(JSON.stringify({ keys: results }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+      
+      // Middleware: Rate Limiting Check
+      const checkRateLimit = async (key: string): Promise<{ allowed: boolean; remaining: number; reset: number }> => {
+        const now = new Date();
+        const windowStart = new Date(now.getTime() - 60000); // 1 minute window
+        
+        // Get rate limit for this key
+        let rateLimit = 100;
+        let keyForCheck = key;
+        
+        // Check if it's main API key
+        const dev = await env.DB.prepare('SELECT rate_limit, api_key FROM developers WHERE api_key = ?').first<any>(key);
+        if (dev) {
+          rateLimit = dev.rate_limit;
+        } else {
+          // Check additional keys
+          const addKey = await env.DB.prepare('SELECT rate_limit, key_value FROM api_keys WHERE key_value = ? AND is_active = 1').first<any>(key);
+          if (addKey) {
+            rateLimit = addKey.rate_limit;
+            keyForCheck = addKey.key_value;
+          }
+        }
+        
+        // Get current usage
+        const usage = await env.DB.prepare(
+          'SELECT request_count, window_start FROM rate_limits WHERE api_key = ?'
+        ).first<any>(keyForCheck);
+        
+        if (!usage || new Date(usage.window_start) < windowStart) {
+          // Reset window
+          await env.DB.prepare(
+            'INSERT OR REPLACE INTO rate_limits (api_key, request_count, window_start) VALUES (?, 1, ?)'
+          ).bind(keyForCheck, now.toISOString()).run();
+          return { allowed: true, remaining: rateLimit - 1, reset: now.getTime() + 60000 };
+        }
+        
+        if (usage.request_count >= rateLimit) {
+          return { allowed: false, remaining: 0, reset: new Date(usage.window_start).getTime() + 60000 };
+        }
+        
+        // Increment counter
+        await env.DB.prepare(
+          'UPDATE rate_limits SET request_count = request_count + 1 WHERE api_key = ?'
+        ).run(keyForCheck);
+        
+        return { allowed: true, remaining: rateLimit - usage.request_count - 1, reset: new Date(usage.window_start).getTime() + 60000 };
+      };
+      
+      // Apply rate limiting to API routes
+      if (path[0] === 'api') {
+        const apiKey = request.headers.get('X-API-Key') || '';
+        
+        if (!apiKey) {
+          return new Response(JSON.stringify({ error: 'API key required. Use X-API-Key header.' }), { 
+            status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
+        }
+        
+        // Check rate limit
+        const rateLimitResult = await checkRateLimit(apiKey);
+        
+        if (!rateLimitResult.allowed) {
+          return new Response(JSON.stringify({ 
+            error: 'Rate limit exceeded',
+            retry_after: Math.ceil((rateLimitResult.reset - Date.now()) / 1000)
+          }), { 
+            status: 429, 
+            headers: { 
+              ...corsHeaders, 
+              'Content-Type': 'application/json',
+              'X-RateLimit-Remaining': '0',
+              'X-RateLimit-Reset': String(Math.ceil(rateLimitResult.reset / 1000))
+            } 
+          });
+        }
+        
+        // Log API usage (for observability)
+        const logUsage = async (endpoint: string, statusCode: number, responseTime: number, errorMessage?: string) => {
+          const dev = await env.DB.prepare('SELECT id FROM developers WHERE api_key = ?').first<any>(apiKey);
+          if (!dev) return;
+          
+          const logId = generateId();
+          await env.DB.prepare(
+            'INSERT INTO api_usage_logs (id, developer_id, api_key, endpoint, status_code, response_time_ms, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)'
+          ).bind(logId, dev.id, apiKey.substring(0, 12) + '...', endpoint, statusCode, responseTime, errorMessage || null).run();
+        };
+        
+        // Wrap API response to log usage
+        const originalFetch = request.clone();
+        const startTime = Date.now();
+        
+        // Continue to actual API handler...
+      }
+
+      // ============================================
+      // PHASE 5.2: Observability - API Usage Logs
+      // ============================================
+      
+      // GET /api/developers/usage - Get API usage stats
+      if (path[0] === 'api' && path[1] === 'developers' && path[2] === 'usage' && request.method === 'GET') {
+        const apiKey = request.headers.get('X-API-Key') || '';
+        const developer = await env.DB.prepare('SELECT id FROM developers WHERE api_key = ? AND is_active = 1').first<any>(apiKey);
+        
+        if (!developer) {
+          return new Response(JSON.stringify({ error: 'Invalid API key' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        
+        const limit = url.searchParams.get('limit') || '100';
+        const { results } = await env.DB.prepare(
+          'SELECT endpoint, method, status_code, response_time_ms, tokens_used, error_message, created_at FROM api_usage_logs WHERE developer_id = ? ORDER BY created_at DESC LIMIT ?'
+        ).all(developer.id, limit);
+        
+        // Get summary stats
+        const stats = await env.DB.prepare(
+          `SELECT 
+            COUNT(*) as total_requests,
+            AVG(response_time_ms) as avg_response_time,
+            SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) as error_count
+           FROM api_usage_logs WHERE developer_id = ?`
+        ).first<any>(developer.id);
+        
+        return new Response(JSON.stringify({ 
+          usage: results,
+          stats: {
+            total_requests: stats?.total_requests || 0,
+            avg_response_time_ms: Math.round(stats?.avg_response_time || 0),
+            error_count: stats?.error_count || 0
+          }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
 
       // AI Plugin

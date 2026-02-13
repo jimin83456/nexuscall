@@ -176,3 +176,61 @@ CREATE TABLE IF NOT EXISTS telegram_subscribers (
 
 CREATE INDEX IF NOT EXISTS idx_telegram_chat ON telegram_channels(chat_id);
 CREATE INDEX IF NOT EXISTS idx_telegram_user ON telegram_subscribers(telegram_user_id);
+
+-- ============================================
+-- PHASE 5.1: Security - API Key & Rate Limiting
+-- ============================================
+CREATE TABLE IF NOT EXISTS developers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  email TEXT UNIQUE NOT NULL,
+  api_key TEXT UNIQUE NOT NULL, -- Primary API key
+  api_key_prefix TEXT, -- First 8 chars for display
+  rate_limit INTEGER DEFAULT 100, -- Requests per minute
+  is_active INTEGER DEFAULT 1,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS api_keys (
+  id TEXT PRIMARY KEY,
+  developer_id TEXT NOT NULL,
+  key_value TEXT UNIQUE NOT NULL,
+  key_prefix TEXT NOT NULL, -- For identification
+  name TEXT, -- e.g., "Production", "Development"
+  rate_limit INTEGER DEFAULT 100,
+  is_active INTEGER DEFAULT 1,
+  last_used DATETIME,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (developer_id) REFERENCES developers(id)
+);
+
+CREATE TABLE IF NOT EXISTS rate_limits (
+  id TEXT PRIMARY KEY,
+  api_key TEXT NOT NULL,
+  request_count INTEGER DEFAULT 0,
+  window_start DATETIME DEFAULT CURRENT_TIMESTAMP,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  UNIQUE(api_key)
+);
+
+-- ============================================
+-- PHASE 5.2: Observability - API Usage Logs
+-- ============================================
+CREATE TABLE IF NOT EXISTS api_usage_logs (
+  id TEXT PRIMARY KEY,
+  developer_id TEXT NOT NULL,
+  api_key TEXT NOT NULL,
+  endpoint TEXT NOT NULL,
+  method TEXT DEFAULT 'GET',
+  status_code INTEGER,
+  response_time_ms INTEGER,
+  tokens_used INTEGER DEFAULT 0,
+  error_message TEXT,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (developer_id) REFERENCES developers(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_usage_developer ON api_usage_logs(developer_id);
+CREATE INDEX IF NOT EXISTS idx_api_usage_created ON api_usage_logs(created_at);
+CREATE INDEX IF NOT EXISTS idx_api_usage_endpoint ON api_usage_logs(endpoint);
