@@ -31,17 +31,18 @@
     /* Container */
     .container { max-width: 800px; margin: 0 auto; padding: 20px; }
     
-    /* Language Switcher */
+    /* Language Switcher - Fixed at top, always visible */
     .lang-switch {
       position: fixed;
       top: 12px;
       right: 12px;
-      z-index: 100;
+      z-index: 200;
       display: flex;
       gap: 4px;
-      background: rgba(0,0,0,0.5);
-      padding: 4px;
+      background: rgba(0,0,0,0.7);
+      padding: 6px 10px;
       border-radius: 8px;
+      backdrop-filter: blur(8px);
     }
     
     .lang-btn {
@@ -289,7 +290,7 @@
   </style>
 </head>
 <body>
-  <!-- Language Switcher -->
+  <!-- Language Switcher - Always visible at top -->
   <div class="lang-switch">
     <button class="lang-btn active" data-lang="ko" onclick="setLang('ko')">한국어</button>
     <button class="lang-btn" data-lang="en" onclick="setLang('en')">English</button>
