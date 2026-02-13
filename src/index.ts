@@ -825,7 +825,7 @@ curl https://nxscall.com/api/developers/usage \\
         const apiKey = request.headers.get('X-API-Key') || '';
         const developer = await env.DB.prepare(
           'SELECT id, name, email, api_key_prefix, rate_limit, is_active, created_at FROM developers WHERE api_key = ? AND is_active = 1'
-        ).first<any>(apiKey);
+        ).bind(apiKey).first<any>();
         
         if (!developer) {
           return new Response(JSON.stringify({ error: 'Invalid API key' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -837,7 +837,7 @@ curl https://nxscall.com/api/developers/usage \\
       // POST /api/developers/keys - Create additional API key
       if (path[0] === 'api' && path[1] === 'developers' && path[2] === 'keys' && request.method === 'POST') {
         const apiKey = request.headers.get('X-API-Key') || '';
-        const developer = await env.DB.prepare('SELECT id FROM developers WHERE api_key = ? AND is_active = 1').first<any>(apiKey);
+        const developer = await env.DB.prepare('SELECT id FROM developers WHERE api_key = ? AND is_active = 1').bind(apiKey).first<any>();
         
         if (!developer) {
           return new Response(JSON.stringify({ error: 'Invalid API key' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -864,7 +864,7 @@ curl https://nxscall.com/api/developers/usage \\
       // GET /api/developers/keys - List API keys
       if (path[0] === 'api' && path[1] === 'developers' && path[2] === 'keys' && request.method === 'GET') {
         const apiKey = request.headers.get('X-API-Key') || '';
-        const developer = await env.DB.prepare('SELECT id FROM developers WHERE api_key = ? AND is_active = 1').first<any>(apiKey);
+        const developer = await env.DB.prepare('SELECT id FROM developers WHERE api_key = ? AND is_active = 1').bind(apiKey).first<any>();
         
         if (!developer) {
           return new Response(JSON.stringify({ error: 'Invalid API key' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -952,9 +952,13 @@ curl https://nxscall.com/api/developers/usage \\
           });
         }
         
+        // Add rate limit headers to successful responses too
+        corsHeaders['X-RateLimit-Remaining'] = String(rateLimitResult.remaining);
+        corsHeaders['X-RateLimit-Reset'] = String(Math.ceil(rateLimitResult.reset / 1000));
+        
         // Log API usage (for observability)
         const logUsage = async (endpoint: string, statusCode: number, responseTime: number, errorMessage?: string) => {
-          const dev = await env.DB.prepare('SELECT id FROM developers WHERE api_key = ?').first<any>(apiKey);
+          const dev = await env.DB.prepare('SELECT id FROM developers WHERE api_key = ?').bind(apiKey).first<any>();
           if (!dev) return;
           
           const logId = generateId();
@@ -977,7 +981,7 @@ curl https://nxscall.com/api/developers/usage \\
       // GET /api/developers/usage - Get API usage stats
       if (path[0] === 'api' && path[1] === 'developers' && path[2] === 'usage' && request.method === 'GET') {
         const apiKey = request.headers.get('X-API-Key') || '';
-        const developer = await env.DB.prepare('SELECT id FROM developers WHERE api_key = ? AND is_active = 1').first<any>(apiKey);
+        const developer = await env.DB.prepare('SELECT id FROM developers WHERE api_key = ? AND is_active = 1').bind(apiKey).first<any>();
         
         if (!developer) {
           return new Response(JSON.stringify({ error: 'Invalid API key' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
