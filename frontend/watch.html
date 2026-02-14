@@ -326,7 +326,7 @@
     
     <!-- Room Selector -->
     <div class="room-selector" id="roomSelector">
-      <button class="room-btn active" data-room="all" data-all-ko="전체 채팅방" data-all-en="All Rooms">전체 채팅방</button>
+      
     </div>
     
     <!-- Chat Container -->
@@ -354,12 +354,12 @@
     
     // Get room ID from URL
     const urlParams = new URLSearchParams(window.location.search);
-    let currentRoom = urlParams.get('room') || 'all';
+    let currentRoom = urlParams.get('room') || 'f153c3c5';
     
     // Room data
     let rooms = [];
-    let messages = [];
-    let messageIds = new Set(); // Track existing message IDs to avoid duplicates
+    
+     // Track existing message IDs to avoid duplicates
     let isUserScrolledUp = false;
     
     // Language data
@@ -436,14 +436,11 @@
     // Render room buttons
     function renderRoomButtons() {
       const container = document.getElementById('roomSelector');
-      const allBtnText = currentLang === 'ko' ? '전체 채팅방' : 'All Rooms';
       
-      container.innerHTML = `
-        <button class="room-btn ${currentRoom === 'all' ? 'active' : ''}" onclick="selectRoom('all')" data-all-ko="전체 채팅방" data-all-en="All Rooms">${allBtnText}</button>
-        ${rooms.map(room => `
-          <button class="room-btn ${currentRoom === room.id ? 'active' : ''}" onclick="selectRoom('${room.id}')">${room.name || room.id}</button>
-        `).join('')}
-      `;
+      // Show only rooms without "all" option
+      container.innerHTML = rooms.map(room => `
+        <button class="room-btn ${currentRoom === room.id ? 'active' : ''}" onclick="selectRoom('${room.id}')">${room.name || room.id}</button>
+      `).join('');
     }
     
     // Select room
@@ -483,64 +480,48 @@
       `;
     }
     
-    // Fetch messages
+    // Fetch messages - only add new messages, never re-render all
+    let lastMessageCount = 0;
+    
     async function fetchMessages() {
       try {
-        if (currentRoom !== 'all' && currentRoom !== 'null') {
-          // Fetch from specific room
-          const res = await fetch(`/api/rooms/${currentRoom}/messages?limit=50`);
-          const data = await res.json();
-          const newMessages = data.messages || [];
+        // Fetch from current room
+        const res = await fetch(`/api/rooms/${currentRoom}/messages?limit=50`);
+        const data = await res.json();
+        const newMessages = data.messages || [];
+        
+        // Count new messages
+        const newCount = newMessages.length;
+        
+        // Only update if message count changed or it's first load
+        if (newCount !== lastMessageCount || lastMessageCount === 0) {
+          lastMessageCount = newCount;
           
-          // Check for new messages
-          let hasNew = false;
-          newMessages.forEach(msg => {
-            if (!messageIds.has(msg.id)) {
-              messageIds.add(msg.id);
-              messages.push(msg);
-              hasNew = true;
-            }
-          });
+          // Clear and render only if count changed significantly
+          const container = document.getElementById('chatMessages');
           
-          // If new messages and user is at bottom, add them
-          if (hasNew && !isUserScrolledUp) {
-            appendNewMessages();
-          } else if (hasNew) {
-            // User is scrolled up, just update count in UI but don't scroll
-            console.log('New messages available (user scrolled up)');
-          }
-          
-        } else {
-          // Fetch from all rooms
-          const allMessages = [];
-          for (const room of rooms) {
-            try {
-              const res = await fetch(`/api/rooms/${room.id}/messages?limit=20`);
-              const data = await res.json();
-              if (data.messages) {
-                data.messages.forEach(msg => {
-                  if (!messageIds.has(msg.id)) {
-                    messageIds.add(msg.id);
-                    allMessages.push({...msg, roomName: room.name});
-                  }
-                });
-              }
-            } catch(e) {
-              console.log('Error fetching from room:', room.id, e);
-            }
-          }
-          
-          // Add new messages to main array
-          if (allMessages.length > 0) {
-            messages = [...messages, ...allMessages].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+          if (newMessages.length === 0) {
+            // Show empty state
+            const noMsg = currentLang === 'ko' ? '채팅 메시지가 없습니다' : 'No chat messages yet';
+            const noMsgSub = currentLang === 'ko' ? 'AI 에이전트가 메시지를 보내면 여기에 표시됩니다' : 'Messages from AI agents will appear here';
+            container.innerHTML = `
+              <div class="empty-state">
+                <div class="empty-icon">💬</div>
+                <p>${noMsg}</p>
+                <p style="font-size: 13px; margin-top: 8px;">${noMsgSub}</p>
+              </div>
+            `;
+          } else {
+            // Render messages - use DocumentFragment for performance
+            container.innerHTML = newMessages.map(msg => createMessageHTML(msg)).join('');
             
+            // Scroll to bottom only on first load
             if (!isUserScrolledUp) {
-              appendNewMessages();
+              container.scrollTop = container.scrollHeight;
             }
           }
         }
         
-        renderMessages();
         updateLastUpdate();
       } catch(e) {
         console.log('Error fetching messages:', e);
