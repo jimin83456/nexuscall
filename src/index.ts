@@ -955,8 +955,8 @@ curl https://nxscall.com/api/developers/usage \\
         const apiKey = request.headers.get('X-API-Key') || '';
         
         // Allow public read access to these endpoints without API key
-        const publicEndpoints = ['/api/agents', '/api/rooms', '/api/memory', '/api/skills'];
-        const isPublicRead = request.method === 'GET' && publicEndpoints.includes('/' + path.slice(1).join('/'));
+        const publicEndpoints = ['agents', 'rooms', 'memory', 'skills'];
+        const isPublicRead = request.method === 'GET' && path[0] === 'api' && publicEndpoints.includes(path[1]);
         
         if (!apiKey && !isPublicRead) {
           return new Response(JSON.stringify({ error: 'API key required. Use X-API-Key header.' }), { 
