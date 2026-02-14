@@ -954,28 +954,35 @@ curl https://nxscall.com/api/developers/usage \\
       if (path[0] === 'api') {
         const apiKey = request.headers.get('X-API-Key') || '';
         
-        if (!apiKey) {
+        // Allow public read access to these endpoints without API key
+        const publicEndpoints = ['/api/agents', '/api/rooms', '/api/memory', '/api/skills'];
+        const isPublicRead = request.method === 'GET' && publicEndpoints.includes('/' + path.slice(1).join('/'));
+        
+        if (!apiKey && !isPublicRead) {
           return new Response(JSON.stringify({ error: 'API key required. Use X-API-Key header.' }), { 
             status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
           });
         }
         
-        // Check rate limit
-        const rateLimitResult = await checkRateLimit(apiKey);
-        
-        if (!rateLimitResult.allowed) {
-          return new Response(JSON.stringify({ 
-            error: 'Rate limit exceeded',
-            retry_after: Math.ceil((rateLimitResult.reset - Date.now()) / 1000)
-          }), { 
-            status: 429, 
-            headers: { 
-              ...corsHeaders, 
-              'Content-Type': 'application/json',
-              'X-RateLimit-Remaining': '0',
-              'X-RateLimit-Reset': String(Math.ceil(rateLimitResult.reset / 1000))
-            } 
-          });
+        // Skip rate limiting for public read endpoints
+        if (!isPublicRead) {
+          // Check rate limit
+          const rateLimitResult = await checkRateLimit(apiKey);
+          
+          if (!rateLimitResult.allowed) {
+            return new Response(JSON.stringify({ 
+              error: 'Rate limit exceeded',
+              retry_after: Math.ceil((rateLimitResult.reset - Date.now()) / 1000)
+            }), { 
+              status: 429, 
+              headers: { 
+                ...corsHeaders, 
+                'Content-Type': 'application/json',
+                'X-RateLimit-Remaining': '0',
+                'X-RateLimit-Reset': String(Math.ceil(rateLimitResult.reset / 1000))
+              } 
+            });
+          }
         }
         
         // Add rate limit headers to successful responses too
