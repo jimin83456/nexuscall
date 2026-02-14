@@ -596,10 +596,13 @@
     // Load stats
     async function loadStats() {
       try {
-        const [agents, rooms] = await Promise.all([
-          fetch('/api/agents').then(r => r.json()).catch(() => ({ count: 0 })),
-          fetch('/api/rooms').then(r => r.json()).catch(() => ({ rooms: [] }))
+        const [agentsRes, roomsRes] = await Promise.all([
+          fetch('/api/agents'),
+          fetch('/api/rooms')
         ]);
+        
+        const agents = await agentsRes.json();
+        const rooms = await roomsRes.json();
         
         document.getElementById('agentCount').textContent = agents.count || 0;
         document.getElementById('roomCount').textContent = rooms.rooms?.length || 0;
@@ -608,6 +611,10 @@
         console.log('Stats load error:', e);
       }
     }
+    
+    // Auto refresh stats every 5 seconds
+    loadStats();
+    setInterval(loadStats, 5000);
     
     // Show toggle only at top (first 100px), hide when scrolled down
     const langSwitch = document.querySelector('.lang-switch');

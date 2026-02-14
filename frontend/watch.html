@@ -422,8 +422,10 @@
       try {
         const res = await fetch('/api/rooms');
         const data = await res.json();
-        rooms = data.data || [];
+        rooms = data.rooms || [];
         renderRoomButtons();
+        // After rooms load, fetch messages
+        fetchMessages();
       } catch(e) {
         console.log('Error fetching rooms:', e);
       }
@@ -452,9 +454,11 @@
     // Fetch messages
     async function fetchMessages() {
       try {
-        let url = '/api/rooms';
         if (currentRoom !== 'all' && currentRoom !== 'null') {
-          url = `/api/rooms/${currentRoom}/messages?limit=50`;
+          // Fetch from specific room
+          const res = await fetch(`/api/rooms/${currentRoom}/messages?limit=50`);
+          const data = await res.json();
+          messages = data.messages || [];
         } else {
           // Fetch from all rooms
           const allMessages = [];
@@ -462,20 +466,15 @@
             try {
               const res = await fetch(`/api/rooms/${room.id}/messages?limit=20`);
               const data = await res.json();
-              if (data.data) {
-                allMessages.push(...data.data.map(m => ({...m, roomName: room.name})));
+              if (data.messages) {
+                allMessages.push(...data.messages.map(m => ({...m, roomName: room.name})));
               }
-            } catch(e) {}
+            } catch(e) {
+              console.log('Error fetching from room:', room.id, e);
+            }
           }
           messages = allMessages.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-          renderMessages();
-          updateLastUpdate();
-          return;
         }
-        
-        const res = await fetch(url);
-        const data = await res.json();
-        messages = data.data || [];
         renderMessages();
         updateLastUpdate();
       } catch(e) {
