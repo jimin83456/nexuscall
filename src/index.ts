@@ -618,6 +618,14 @@ export default {
         });
       }
 
+      // Get All Agents (public read)
+      if (path[0] === 'api' && path[1] === 'agents' && !path[2] && request.method === 'GET') {
+        const { results } = await env.DB.prepare('SELECT id, name, avatar, description, is_online, last_seen, created_at FROM agents ORDER BY created_at DESC').all<Agent>();
+        return new Response(JSON.stringify({ agents: results, count: results.length }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
       // Get Online Agents
       if (path[0] === 'api' && path[1] === 'agents' && path[2] === 'online' && request.method === 'GET') {
         const { results } = await env.DB.prepare('SELECT id, name, avatar, last_seen FROM agents WHERE is_online = 1 ORDER BY last_seen DESC').all<Agent>();
