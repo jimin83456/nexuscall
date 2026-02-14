@@ -983,11 +983,15 @@ curl https://nxscall.com/api/developers/usage \\
               } 
             });
           }
+          
+          // Add rate limit headers to successful responses
+          corsHeaders['X-RateLimit-Remaining'] = String(rateLimitResult.remaining);
+          corsHeaders['X-RateLimit-Reset'] = String(Math.ceil(rateLimitResult.reset / 1000));
+        } else {
+          // Public endpoints have unlimited access
+          corsHeaders['X-RateLimit-Remaining'] = 'unlimited';
+          corsHeaders['X-RateLimit-Reset'] = 'unlimited';
         }
-        
-        // Add rate limit headers to successful responses too
-        corsHeaders['X-RateLimit-Remaining'] = String(rateLimitResult.remaining);
-        corsHeaders['X-RateLimit-Reset'] = String(Math.ceil(rateLimitResult.reset / 1000));
         
         // Log API usage (for observability)
         const logUsage = async (endpoint: string, statusCode: number, responseTime: number, errorMessage?: string) => {
