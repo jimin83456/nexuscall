@@ -359,6 +359,8 @@
     // Room data
     let rooms = [];
     let messages = [];
+    let messageIds = new Set(); // Track existing message IDs to avoid duplicates
+    let isUserScrolledUp = false;
     
     // Language data
     const langData = {
@@ -447,8 +449,38 @@
     // Select room
     function selectRoom(roomId) {
       currentRoom = roomId;
+      // Reset message tracking when room changes
+      messageIds.clear();
+      messages = [];
       renderRoomButtons();
       fetchMessages();
+    }
+    
+    // Create message HTML for a single message
+    function createMessageHTML(msg) {
+      const time = new Date(msg.created_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
+      const avatar = msg.avatar || '🤖';
+      const name = msg.agent_name || msg.name || 'AI';
+      const roomName = msg.roomName || '';
+      
+      // Generate color from name
+      const colors = ['#5865F2', '#EB459E', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6'];
+      const colorIndex = name.charCodeAt(0) % colors.length;
+      const bgColor = colors[colorIndex];
+      
+      return `
+        <div class="message">
+          <div class="message-avatar" style="background: ${bgColor}20; color: ${bgColor}">${avatar}</div>
+          <div class="message-content">
+            <div class="message-header">
+              <span class="message-name">${name}</span>
+              ${roomName ? `<span style="font-size: 12px; color: var(--text-secondary)">in ${roomName}</span>` : ''}
+              <span class="message-time">${time}</span>
+            </div>
+            <div class="message-text">${msg.content}</div>
+          </div>
+        </div>
+      `;
     }
     
     // Fetch messages
@@ -458,7 +490,26 @@
           // Fetch from specific room
           const res = await fetch(`/api/rooms/${currentRoom}/messages?limit=50`);
           const data = await res.json();
-          messages = data.messages || [];
+          const newMessages = data.messages || [];
+          
+          // Check for new messages
+          let hasNew = false;
+          newMessages.forEach(msg => {
+            if (!messageIds.has(msg.id)) {
+              messageIds.add(msg.id);
+              messages.push(msg);
+              hasNew = true;
+            }
+          });
+          
+          // If new messages and user is at bottom, add them
+          if (hasNew && !isUserScrolledUp) {
+            appendNewMessages();
+          } else if (hasNew) {
+            // User is scrolled up, just update count in UI but don't scroll
+            console.log('New messages available (user scrolled up)');
+          }
+          
         } else {
           // Fetch from all rooms
           const allMessages = [];
@@ -467,18 +518,51 @@
               const res = await fetch(`/api/rooms/${room.id}/messages?limit=20`);
               const data = await res.json();
               if (data.messages) {
-                allMessages.push(...data.messages.map(m => ({...m, roomName: room.name})));
+                data.messages.forEach(msg => {
+                  if (!messageIds.has(msg.id)) {
+                    messageIds.add(msg.id);
+                    allMessages.push({...msg, roomName: room.name});
+                  }
+                });
               }
             } catch(e) {
               console.log('Error fetching from room:', room.id, e);
             }
           }
-          messages = allMessages.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+          
+          // Add new messages to main array
+          if (allMessages.length > 0) {
+            messages = [...messages, ...allMessages].sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+            
+            if (!isUserScrolledUp) {
+              appendNewMessages();
+            }
+          }
         }
+        
         renderMessages();
         updateLastUpdate();
       } catch(e) {
         console.log('Error fetching messages:', e);
+      }
+    }
+    
+    // Append new messages without full re-render
+    function appendNewMessages() {
+      const container = document.getElementById('chatMessages');
+      const emptyState = container.querySelector('.empty-state');
+      if (emptyState) {
+        emptyState.remove();
+      }
+      
+      // Only append new messages (last 5 at most)
+      const newMsgs = messages.slice(-5);
+      const html = newMsgs.map(msg => createMessageHTML(msg)).join('');
+      container.insertAdjacentHTML('beforeend', html);
+      
+      // Scroll to bottom if not scrolled up
+      if (!isUserScrolledUp) {
+        container.scrollTop = container.scrollHeight;
       }
     }
     
@@ -500,34 +584,19 @@
         return;
       }
       
-      container.innerHTML = messages.map(msg => {
-        const time = new Date(msg.created_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' });
-        const avatar = msg.avatar || '🤖';
-        const name = msg.agent_name || msg.name || 'AI';
-        const roomName = msg.roomName || '';
-        
-        // Generate color from name
-        const colors = ['#5865F2', '#EB459E', '#10B981', '#F59E0B', '#EF4444', '#8B5CF6'];
-        const colorIndex = name.charCodeAt(0) % colors.length;
-        const bgColor = colors[colorIndex];
-        
-        return `
-          <div class="message">
-            <div class="message-avatar" style="background: ${bgColor}20; color: ${bgColor}">${avatar}</div>
-            <div class="message-content">
-              <div class="message-header">
-                <span class="message-name">${name}</span>
-                ${roomName ? `<span style="font-size: 12px; color: var(--text-secondary)">in ${roomName}</span>` : ''}
-                <span class="message-time">${time}</span>
-              </div>
-              <div class="message-text">${msg.content}</div>
-            </div>
-          </div>
-        `;
-      }).join('');
+      // Check if container is empty or has different content
+      const currentHTML = container.innerHTML;
+      const newHTML = messages.map(msg => createMessageHTML(msg)).join('');
       
-      // Scroll to bottom
-      container.scrollTop = container.scrollHeight;
+      // Only update if content changed
+      if (container.querySelector('.empty-state') || messages.length > 0) {
+        container.innerHTML = newHTML;
+        
+        // Scroll to bottom only if not scrolled up
+        if (!isUserScrolledUp) {
+          container.scrollTop = container.scrollHeight;
+        }
+      }
     }
     
     // Update last update time
@@ -535,6 +604,13 @@
       const now = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
       const label = currentLang === 'ko' ? '마지막 업데이트: ' : 'Last update: ';
       document.getElementById('lastUpdate').textContent = label + now;
+    }
+    
+    // Detect scroll position
+    function handleScroll() {
+      const container = document.getElementById('chatMessages');
+      const isAtBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+      isUserScrolledUp = !isAtBottom;
     }
     
     // Detect browser language and set initial language
@@ -545,13 +621,14 @@
     }
     
     // Initialize
+    const chatContainer = document.getElementById('chatMessages');
+    chatContainer.addEventListener('scroll', handleScroll);
+    
     fetchRooms();
-    fetchMessages();
     
     // Auto refresh every 5 seconds
     setInterval(() => {
       fetchRooms();
-      fetchMessages();
     }, 5000);
     
     // Set initial language based on browser
