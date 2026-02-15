@@ -618,6 +618,157 @@ export default {
         });
       }
 
+      // ============================================
+      // Phase 6: 1:1 DM Collaboration APIs
+      // ============================================
+
+      // Create DM Room (1:1)
+      if (path[0] === 'api' && path[1] === 'rooms' && path[2] === 'dm' && !path[3] && request.method === 'POST') {
+        const body = await request.json<{ participants: string[]; task?: string; visibility?: string }>();
+        
+        if (!body.participants || body.participants.length < 2) {
+          return new Response(JSON.stringify({ error: 'DM requires at least 2 participants' }), { 
+            status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
+        }
+
+        const dmId = 'dm_' + generateId().substring(0, 8);
+        const dmName = `DM: ${body.participants.join(' ↔ ')}`;
+        
+        await env.DB.prepare(
+          'INSERT INTO rooms (id, name, type, created_by, is_dm) VALUES (?, ?, ?, ?, 1)'
+        ).bind(dmId, dmName, 'dm', body.participants[0]).run();
+
+        // Add all participants to the DM room
+        for (const participantId of body.participants) {
+          const { results: agents } = await env.DB.prepare(
+            'SELECT id FROM agents WHERE id = ? OR name = ?'
+          ).bind(participantId, participantId).all<Agent>();
+          
+          if (agents.length > 0) {
+            await env.DB.prepare(
+              'INSERT OR IGNORE INTO room_members (room_id, agent_id) VALUES (?, ?)'
+            ).bind(dmId, agents[0].id).run();
+          }
+        }
+
+        return new Response(JSON.stringify({
+          id: dmId,
+          name: dmName,
+          type: 'dm',
+          task: body.task || '',
+          visibility: body.visibility || 'public',
+          observation_url: `nxscall.com/watch?session=${dmId}`,
+          ws_endpoint: `wss://${url.host}/ws/room/${dmId}`,
+          message: 'DM room created. Participants can join via WebSocket.'
+        }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // Get DM Room Info
+      if (path[0] === 'api' && path[1] === 'rooms' && path[2] === 'dm' && path[3] && request.method === 'GET') {
+        const dmId = path[3];
+        
+        const { results: rooms } = await env.DB.prepare(
+          'SELECT * FROM rooms WHERE id = ? AND is_dm = 1'
+        ).bind(dmId).all<Room>();
+
+        if (rooms.length === 0) {
+          return new Response(JSON.stringify({ error: 'DM room not found' }), { 
+            status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
+        }
+
+        // Get participants
+        const { results: members } = await env.DB.prepare(`
+          SELECT a.id, a.name, a.avatar, a.is_online 
+          FROM room_members rm 
+          JOIN agents a ON rm.agent_id = a.id 
+          WHERE rm.room_id = ?
+        `).bind(dmId).all<Agent>();
+
+        return new Response(JSON.stringify({
+          room: rooms[0],
+          participants: members,
+          observation_url: `nxscall.com/watch?session=${dmId}`
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // Invite Agent to DM
+      if (path[0] === 'api' && path[1] === 'rooms' && path[2] === 'dm' && path[3] && path[4] === 'invite' && request.method === 'POST') {
+        const dmId = path[3];
+        const body = await request.json<{ agent_id: string }>();
+        
+        // Verify DM room exists
+        const { results: rooms } = await env.DB.prepare(
+          'SELECT id FROM rooms WHERE id = ? AND is_dm = 1'
+        ).bind(dmId).all<Room>();
+
+        if (rooms.length === 0) {
+          return new Response(JSON.stringify({ error: 'DM room not found' }), { 
+            status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
+        }
+
+        // Find and add agent
+        const { results: agents } = await env.DB.prepare(
+          'SELECT id FROM agents WHERE id = ? OR name = ?'
+        ).bind(body.agent_id, body.agent_id).all<Agent>();
+
+        if (agents.length === 0) {
+          return new Response(JSON.stringify({ error: 'Agent not found' }), { 
+            status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
+        }
+
+        await env.DB.prepare(
+          'INSERT OR IGNORE INTO room_members (room_id, agent_id) VALUES (?, ?)'
+        ).bind(dmId, agents[0].id).run();
+
+        return new Response(JSON.stringify({
+          success: true,
+          room_id: dmId,
+          invited_agent: body.agent_id,
+          ws_url: `wss://${url.host}/ws/room/${dmId}?agent_id=${body.agent_id}`
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // Send DM Message
+      if (path[0] === 'api' && path[1] === 'rooms' && path[2] === 'dm' && path[3] && path[4] === 'messages' && request.method === 'POST') {
+        const dmId = path[3];
+        const apiKey = request.headers.get('X-API-Key') || '';
+        
+        // Get sender agent
+        const { results: agents } = await env.DB.prepare(
+          'SELECT id, name, avatar FROM agents WHERE api_key = ?'
+        ).bind(apiKey).all<Agent>();
+
+        if (agents.length === 0) {
+          return new Response(JSON.stringify({ error: 'Invalid API key' }), { 
+            status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
+        }
+
+        const sender = agents[0];
+        const body = await request.json<{ content: string; receiver_id?: string }>();
+        
+        const messageId = generateId();
+        const createdAt = new Date().toISOString();
+
+        await env.DB.prepare(
+          'INSERT INTO messages (id, room_id, agent_id, content, created_at, is_dm) VALUES (?, ?, ?, ?, ?, 1)'
+        ).bind(messageId, dmId, sender.id, body.content, createdAt).run();
+
+        return new Response(JSON.stringify({
+          id: messageId,
+          room_id: dmId,
+          sender: { id: sender.id, name: sender.name },
+          receiver_id: body.receiver_id,
+          content: body.content,
+          created_at: createdAt,
+          type: 'direct_message'
+        }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
       // Get All Agents (public read)
       if (path[0] === 'api' && path[1] === 'agents' && !path[2] && request.method === 'GET') {
         const { results } = await env.DB.prepare('SELECT id, name, avatar, description, is_online, last_seen, created_at FROM agents ORDER BY created_at DESC').all<Agent>();
