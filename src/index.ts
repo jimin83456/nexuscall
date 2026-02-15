@@ -172,6 +172,78 @@ function isValidSemver(v: string): boolean {
 }
 
 // ============================================
+// Template Resolution ({{input.topic}}, {{steps.search.result.x}})
+// ============================================
+function resolveTemplate(obj: any, context: Record<string, any>): any {
+  if (typeof obj === 'string') {
+    // Replace {{path.to.value}} with actual values
+    return obj.replace(/\{\{([^}]+)\}\}/g, (_, path: string) => {
+      const value = getNestedValue(context, path.trim());
+      if (value === undefined) return `{{${path}}}`;
+      return typeof value === 'object' ? JSON.stringify(value) : String(value);
+    });
+  }
+  if (Array.isArray(obj)) return obj.map(item => resolveTemplate(item, context));
+  if (obj && typeof obj === 'object') {
+    const resolved: Record<string, any> = {};
+    for (const [key, value] of Object.entries(obj)) {
+      resolved[key] = resolveTemplate(value, context);
+    }
+    return resolved;
+  }
+  return obj;
+}
+
+function getNestedValue(obj: any, path: string): any {
+  const parts = path.split('.');
+  let current = obj;
+  for (const part of parts) {
+    if (current === null || current === undefined) return undefined;
+    current = current[part];
+  }
+  return current;
+}
+
+// Simple condition evaluator for workflow branching
+// Supports: { "field": "steps.x.result.status", "operator": "eq"|"neq"|"gt"|"lt"|"contains"|"exists", "value": ... }
+function evaluateCondition(condition: any, context: Record<string, any>): boolean {
+  if (!condition || typeof condition !== 'object') return true;
+
+  // AND array
+  if (Array.isArray(condition)) {
+    return condition.every(c => evaluateCondition(c, context));
+  }
+
+  // OR
+  if (condition.or && Array.isArray(condition.or)) {
+    return condition.or.some((c: any) => evaluateCondition(c, context));
+  }
+
+  // AND
+  if (condition.and && Array.isArray(condition.and)) {
+    return condition.and.every((c: any) => evaluateCondition(c, context));
+  }
+
+  const { field, operator, value } = condition;
+  if (!field || !operator) return true;
+
+  const actual = getNestedValue(context, field);
+
+  switch (operator) {
+    case 'eq': return actual === value;
+    case 'neq': return actual !== value;
+    case 'gt': return typeof actual === 'number' && actual > value;
+    case 'lt': return typeof actual === 'number' && actual < value;
+    case 'gte': return typeof actual === 'number' && actual >= value;
+    case 'lte': return typeof actual === 'number' && actual <= value;
+    case 'contains': return typeof actual === 'string' && actual.includes(value);
+    case 'exists': return actual !== undefined && actual !== null;
+    case 'not_exists': return actual === undefined || actual === null;
+    default: return true;
+  }
+}
+
+// ============================================
 // Rate Limit Helper
 // ============================================
 async function checkRateLimit(env: Env, key: string): Promise<{ allowed: boolean; remaining: number; reset: number }> {
@@ -247,6 +319,61 @@ export default {
           corsHeaders['X-RateLimit-Remaining'] = String(rateLimitResult.remaining);
           corsHeaders['X-RateLimit-Reset'] = String(Math.ceil(rateLimitResult.reset / 1000));
         }
+      }
+
+      // ============================================
+      // Phase 4: B2B Helper Functions
+      // ============================================
+      async function logAudit(orgId: string | null, agentId: string, action: string, resourceType: string | null, resourceId: string | null, details: any = null) {
+        try {
+          const ip = request.headers.get('CF-Connecting-IP') || request.headers.get('X-Forwarded-For') || '';
+          await env.DB.prepare(
+            `INSERT INTO audit_logs (id, org_id, agent_id, action, resource_type, resource_id, details, ip_address, trace_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(generatePrefixedId('aud'), orgId, agentId, action, resourceType, resourceId, details ? JSON.stringify(details) : null, ip, null).run();
+        } catch (e) { console.error('Audit log error:', e); }
+      }
+
+      async function trackUsage(orgId: string, agentId: string, metric: string, quantity: number = 1) {
+        try {
+          const period = new Date().toISOString().substring(0, 7);
+          await env.DB.prepare(
+            `INSERT INTO usage_records (id, org_id, agent_id, metric, quantity, period) VALUES (?, ?, ?, ?, ?, ?)`
+          ).bind(generatePrefixedId('usg'), orgId, agentId, metric, quantity, period).run();
+        } catch (e) { console.error('Usage tracking error:', e); }
+      }
+
+      function matchResource(pattern: string, resource: string): boolean {
+        if (pattern === '*') return true;
+        if (pattern === resource) return true;
+        if (pattern.endsWith('*')) return resource.startsWith(pattern.slice(0, -1));
+        return false;
+      }
+
+      async function checkACL(orgId: string, agentId: string, resource: string, action: string): Promise<boolean> {
+        const policies = await env.DB.prepare(
+          `SELECT rules, priority FROM access_policies WHERE org_id = ? AND status = 'active' ORDER BY priority DESC`
+        ).bind(orgId).all<any>();
+        if (!policies.results || policies.results.length === 0) return true;
+        let explicitAllow = false;
+        for (const policy of policies.results) {
+          const rules = JSON.parse(policy.rules);
+          for (const rule of rules) {
+            if (!matchResource(rule.resource, resource)) continue;
+            if (rule.actions && !rule.actions.includes(action) && !rule.actions.includes('*')) continue;
+            if (rule.effect === 'deny') return false;
+            if (rule.effect === 'allow') explicitAllow = true;
+          }
+        }
+        return explicitAllow || policies.results.length === 0;
+      }
+
+      async function getOrgMembership(orgId: string, agentId: string): Promise<any | null> {
+        return env.DB.prepare('SELECT * FROM org_members WHERE org_id = ? AND agent_id = ?').bind(orgId, agentId).first<any>();
+      }
+
+      function hasRole(actual: string, required: string): boolean {
+        const hierarchy: Record<string, number> = { viewer: 0, member: 1, admin: 2, owner: 3 };
+        return (hierarchy[actual] ?? -1) >= (hierarchy[required] ?? 99);
       }
 
       // ============================================
@@ -811,6 +938,9 @@ export default {
           throw e;
         }
 
+        // Audit log for tool registration
+        await logAudit(null, agent.id, 'tool:register', 'tool', toolId, { name: body.name, version });
+
         return new Response(JSON.stringify({
           ok: true,
           data: {
@@ -1018,6 +1148,1059 @@ export default {
         });
       }
 
+      // ============================================
+      // Phase 2: MCP Relay/Proxy APIs
+      // ============================================
+
+      // POST /api/tools/:toolId/invoke — Tool 호출 프록시
+      if (path[0] === 'api' && path[1] === 'tools' && path[2] && path[3] === 'invoke' && request.method === 'POST') {
+        const startTime = Date.now();
+        const traceId = generatePrefixedId('trace');
+
+        // 1. Auth
+        const caller = await authenticateAgent(env, request);
+        if (!caller) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const toolId = path[2];
+
+        // 2. Fetch tool
+        const tool = await env.DB.prepare(
+          'SELECT t.*, a.name as agent_name FROM mcp_tools t JOIN agents a ON t.agent_id = a.id WHERE t.id = ?'
+        ).bind(toolId).first<any>();
+
+        if (!tool) return new Response(JSON.stringify({ ok: false, error: { code: 'TOOL_NOT_FOUND', message: `Tool ${toolId} not found` } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (tool.status !== 'active') return new Response(JSON.stringify({ ok: false, error: { code: 'TOOL_INACTIVE', message: `Tool is ${tool.status}` } }), { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        // 3. Circuit breaker check
+        const cb = await env.DB.prepare('SELECT * FROM mcp_circuit_breakers WHERE tool_id = ?').bind(toolId).first<any>();
+        if (cb) {
+          if (cb.state === 'open') {
+            const opensAt = new Date(cb.opens_at).getTime();
+            if (Date.now() < opensAt) {
+              return new Response(JSON.stringify({ ok: false, error: { code: 'TOOL_CIRCUIT_OPEN', message: 'Tool temporarily unavailable due to high error rate' } }), { status: 503, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Retry-After': String(Math.ceil((opensAt - Date.now()) / 1000)) } });
+            }
+            // Transition to half_open
+            await env.DB.prepare('UPDATE mcp_circuit_breakers SET state = ? WHERE tool_id = ?').bind('half_open', toolId).run();
+          }
+        }
+
+        // 3.5. ACL check (if caller belongs to an org with policies)
+        const callerOrgs = await env.DB.prepare(
+          `SELECT om.org_id FROM org_members om WHERE om.agent_id = ?`
+        ).bind(caller.id).all<any>();
+        for (const orgRow of (callerOrgs.results || [])) {
+          const aclAllowed = await checkACL(orgRow.org_id, caller.id, `tool:${toolId}`, 'invoke');
+          if (!aclAllowed) {
+            return new Response(JSON.stringify({ ok: false, error: { code: 'ACL_DENIED', message: 'Access denied by organization policy' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+        }
+
+        // 4. Per-tool rate limiting
+        const now = new Date();
+        const windowKey = now.toISOString().substring(0, 16); // minute-level
+        const rl = await env.DB.prepare(
+          'SELECT call_count FROM mcp_rate_limits WHERE agent_id = ? AND tool_id = ? AND window_start = ?'
+        ).bind(caller.id, toolId, windowKey).first<any>();
+
+        const currentCount = rl?.call_count || 0;
+        if (currentCount >= tool.rate_limit_per_min) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'RATE_LIMIT_EXCEEDED', message: `Rate limit ${tool.rate_limit_per_min}/min exceeded` } }), {
+            status: 429, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'X-RateLimit-Limit': String(tool.rate_limit_per_min), 'X-RateLimit-Remaining': '0', 'Retry-After': String(60 - now.getSeconds()) }
+          });
+        }
+
+        // Increment rate limit
+        await env.DB.prepare(
+          'INSERT INTO mcp_rate_limits (agent_id, tool_id, window_start, call_count) VALUES (?, ?, ?, 1) ON CONFLICT(agent_id, tool_id, window_start) DO UPDATE SET call_count = call_count + 1'
+        ).bind(caller.id, toolId, windowKey).run();
+
+        // 5. Parse body
+        const body = await request.json<{ arguments?: any; timeout?: number; async?: boolean; callbackUrl?: string }>().catch(() => ({}));
+        const timeout = Math.min(body.timeout || 30000, 120000);
+        const invocationId = generatePrefixedId('inv');
+
+        // 6. Log invocation (pending)
+        await env.DB.prepare(
+          `INSERT INTO mcp_invocations (id, tool_id, caller_agent_id, provider_agent_id, input, status, is_async, callback_url, trace_id)
+           VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)`
+        ).bind(invocationId, toolId, caller.id, tool.agent_id, JSON.stringify(body.arguments || {}), body.async ? 1 : 0, body.callbackUrl || null, traceId).run();
+
+        // 7. Build proxy request
+        const proxyHeaders: Record<string, string> = { 'Content-Type': 'application/json', 'X-NexusCall-Trace-Id': traceId, 'X-NexusCall-Invocation-Id': invocationId };
+
+        // Auth relay
+        if (tool.auth_type === 'bearer' && tool.auth_config_encrypted) {
+          try {
+            const authConfig = JSON.parse(tool.auth_config_encrypted);
+            if (authConfig.token) proxyHeaders['Authorization'] = `Bearer ${authConfig.token}`;
+          } catch {}
+        } else if (tool.auth_type === 'api_key' && tool.auth_config_encrypted) {
+          try {
+            const authConfig = JSON.parse(tool.auth_config_encrypted);
+            if (authConfig.key) proxyHeaders[authConfig.headerName || 'X-API-Key'] = authConfig.key;
+          } catch {}
+        }
+
+        // 8. Proxy the call
+        let proxyResult: any = null;
+        let proxyStatus: 'success' | 'error' | 'timeout' = 'success';
+        let errorCode: string | null = null;
+        let errorMessage: string | null = null;
+
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), timeout);
+
+          const proxyResponse = await fetch(tool.endpoint, {
+            method: 'POST',
+            headers: proxyHeaders,
+            body: JSON.stringify({ arguments: body.arguments || {}, invocationId, traceId }),
+            signal: controller.signal,
+          });
+
+          clearTimeout(timeoutId);
+
+          const responseBody = await proxyResponse.text();
+          try { proxyResult = JSON.parse(responseBody); } catch { proxyResult = { raw: responseBody }; }
+
+          if (!proxyResponse.ok) {
+            proxyStatus = 'error';
+            errorCode = 'INVOCATION_ERROR';
+            errorMessage = `Provider returned ${proxyResponse.status}`;
+          }
+        } catch (e: any) {
+          proxyStatus = e.name === 'AbortError' ? 'timeout' : 'error';
+          errorCode = e.name === 'AbortError' ? 'INVOCATION_TIMEOUT' : 'INVOCATION_ERROR';
+          errorMessage = e.message || String(e);
+        }
+
+        const latencyMs = Date.now() - startTime;
+        const completedAt = new Date().toISOString();
+
+        // 9. Log result
+        await env.DB.prepare(
+          `UPDATE mcp_invocations SET status = ?, output = ?, error_code = ?, error_message = ?, latency_ms = ?, completed_at = ? WHERE id = ?`
+        ).bind(proxyStatus, proxyResult ? JSON.stringify(proxyResult) : null, errorCode, errorMessage, latencyMs, completedAt, invocationId).run();
+
+        // 9.5. Audit log + usage tracking
+        await logAudit(null, caller.id, 'tool:invoke', 'tool', toolId, { status: proxyStatus, latencyMs, traceId });
+        for (const orgRow of (callerOrgs.results || [])) {
+          await trackUsage(orgRow.org_id, caller.id, 'tool_calls', 1);
+        }
+
+        // 10. Update tool stats
+        const isSuccess = proxyStatus === 'success';
+        await env.DB.prepare(
+          `UPDATE mcp_tools SET
+            call_count = call_count + 1,
+            avg_latency_ms = CASE WHEN call_count = 0 THEN ? ELSE (avg_latency_ms * call_count + ?) / (call_count + 1) END,
+            success_rate = CASE WHEN call_count = 0 THEN ? ELSE (success_rate * call_count + ?) / (call_count + 1) END,
+            updated_at = ?
+          WHERE id = ?`
+        ).bind(latencyMs, latencyMs, isSuccess ? 1.0 : 0.0, isSuccess ? 1.0 : 0.0, completedAt, toolId).run();
+
+        // 11. Circuit breaker update
+        if (!isSuccess) {
+          if (cb) {
+            const newFailures = cb.failure_count + 1;
+            if (cb.state === 'half_open' || newFailures >= 5) {
+              // Open circuit for 60s
+              const opensAt = new Date(Date.now() + 60000).toISOString();
+              await env.DB.prepare(
+                'UPDATE mcp_circuit_breakers SET state = ?, failure_count = ?, last_failure_at = ?, opens_at = ? WHERE tool_id = ?'
+              ).bind('open', newFailures, completedAt, opensAt, toolId).run();
+            } else {
+              await env.DB.prepare(
+                'UPDATE mcp_circuit_breakers SET failure_count = ?, last_failure_at = ? WHERE tool_id = ?'
+              ).bind(newFailures, completedAt, toolId).run();
+            }
+          } else {
+            await env.DB.prepare(
+              'INSERT INTO mcp_circuit_breakers (tool_id, state, failure_count, last_failure_at) VALUES (?, ?, 1, ?)'
+            ).bind(toolId, 'closed', completedAt).run();
+          }
+        } else if (cb) {
+          // Reset on success
+          await env.DB.prepare(
+            'UPDATE mcp_circuit_breakers SET state = ?, failure_count = 0 WHERE tool_id = ?'
+          ).bind('closed', toolId).run();
+        }
+
+        // 12. Return response
+        const httpStatus = proxyStatus === 'success' ? 200 : proxyStatus === 'timeout' ? 504 : 502;
+        return new Response(JSON.stringify({
+          ok: proxyStatus === 'success',
+          data: {
+            invocationId, toolId, status: proxyStatus,
+            result: proxyStatus === 'success' ? proxyResult : undefined,
+            latencyMs,
+            callerAgentId: caller.id,
+            providerAgentId: tool.agent_id,
+            timestamp: completedAt,
+          },
+          ...(proxyStatus !== 'success' ? { error: { code: errorCode, message: errorMessage } } : {}),
+          meta: { requestId: invocationId, traceId, latencyMs },
+        }), { status: httpStatus, headers: { ...corsHeaders, 'Content-Type': 'application/json', 'X-RateLimit-Limit': String(tool.rate_limit_per_min), 'X-RateLimit-Remaining': String(Math.max(0, tool.rate_limit_per_min - currentCount - 1)) } });
+      }
+
+      // GET /api/tools/:toolId/stats — Tool 통계
+      if (path[0] === 'api' && path[1] === 'tools' && path[2] && path[3] === 'stats' && request.method === 'GET') {
+        const toolId = path[2];
+        const tool = await env.DB.prepare(
+          'SELECT id, name, call_count, avg_latency_ms, success_rate, status FROM mcp_tools WHERE id = ?'
+        ).bind(toolId).first<any>();
+        if (!tool) return new Response(JSON.stringify({ ok: false, error: { code: 'TOOL_NOT_FOUND', message: `Tool ${toolId} not found` } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const cb = await env.DB.prepare('SELECT state, failure_count, last_failure_at, opens_at FROM mcp_circuit_breakers WHERE tool_id = ?').bind(toolId).first<any>();
+
+        // Recent invocations summary
+        const recentStats = await env.DB.prepare(
+          `SELECT status, COUNT(*) as count, AVG(latency_ms) as avg_latency
+           FROM mcp_invocations WHERE tool_id = ? AND created_at > datetime('now', '-1 hour')
+           GROUP BY status`
+        ).bind(toolId).all<any>();
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            toolId: tool.id, name: tool.name, status: tool.status,
+            totalCalls: tool.call_count, avgLatencyMs: Math.round(tool.avg_latency_ms || 0),
+            successRate: tool.success_rate,
+            circuitBreaker: cb ? { state: cb.state, failureCount: cb.failure_count, lastFailureAt: cb.last_failure_at, opensAt: cb.opens_at } : { state: 'closed', failureCount: 0 },
+            lastHour: recentStats.results || [],
+          }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // GET /api/invocations — 호출 로그 목록
+      if (path[0] === 'api' && path[1] === 'invocations' && !path[2] && request.method === 'GET') {
+        const caller = await authenticateAgent(env, request);
+        if (!caller) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const toolId = url.searchParams.get('toolId') || '';
+        const status = url.searchParams.get('status') || '';
+        const page = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
+        const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '20')));
+        const offset = (page - 1) * limit;
+
+        let where = '(i.caller_agent_id = ? OR i.provider_agent_id = ?)';
+        let params: any[] = [caller.id, caller.id];
+        if (toolId) { where += ' AND i.tool_id = ?'; params.push(toolId); }
+        if (status) { where += ' AND i.status = ?'; params.push(status); }
+
+        const countResult = await env.DB.prepare(`SELECT COUNT(*) as total FROM mcp_invocations i WHERE ${where}`).bind(...params).first<{ total: number }>();
+        const total = countResult?.total || 0;
+
+        const { results } = await env.DB.prepare(
+          `SELECT i.id, i.tool_id, i.caller_agent_id, i.provider_agent_id, i.status, i.latency_ms, i.error_code, i.trace_id, i.created_at, i.completed_at,
+                  t.name as tool_name
+           FROM mcp_invocations i JOIN mcp_tools t ON i.tool_id = t.id
+           WHERE ${where} ORDER BY i.created_at DESC LIMIT ? OFFSET ?`
+        ).bind(...params, limit, offset).all<any>();
+
+        return new Response(JSON.stringify({ ok: true, data: results, meta: { total, page, limit, pages: Math.ceil(total / limit) } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // GET /api/invocations/:id — 호출 상세
+      if (path[0] === 'api' && path[1] === 'invocations' && path[2] && !path[3] && request.method === 'GET') {
+        const caller = await authenticateAgent(env, request);
+        if (!caller) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const inv = await env.DB.prepare(
+          `SELECT i.*, t.name as tool_name, t.endpoint as tool_endpoint
+           FROM mcp_invocations i JOIN mcp_tools t ON i.tool_id = t.id WHERE i.id = ?`
+        ).bind(path[2]).first<any>();
+
+        if (!inv) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Invocation not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (inv.caller_agent_id !== caller.id && inv.provider_agent_id !== caller.id) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_INSUFFICIENT_SCOPE', message: 'Not authorized to view this invocation' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { ...inv, input: JSON.parse(inv.input), output: inv.output ? JSON.parse(inv.output) : null }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // MCP JSON-RPC 2.0 Endpoint
+      // ============================================
+
+      // POST /mcp/v1 — MCP Protocol Native
+      if (path[0] === 'mcp' && path[1] === 'v1' && !path[2] && request.method === 'POST') {
+        const rpcBody = await request.json<{ jsonrpc: string; id: any; method: string; params?: any }>().catch(() => null);
+
+        if (!rpcBody || rpcBody.jsonrpc !== '2.0') {
+          return new Response(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32600, message: 'Invalid JSON-RPC request' } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        const rpcId = rpcBody.id;
+
+        // initialize
+        if (rpcBody.method === 'initialize') {
+          return new Response(JSON.stringify({
+            jsonrpc: '2.0', id: rpcId,
+            result: {
+              protocolVersion: '2024-11-05',
+              capabilities: {
+                tools: { listChanged: true },
+                resources: { subscribe: true, listChanged: true },
+                logging: {},
+              },
+              serverInfo: { name: 'NexusCall MCP Hub', version: '1.0.0' },
+            }
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        // tools/list
+        if (rpcBody.method === 'tools/list') {
+          const { results } = await env.DB.prepare(
+            'SELECT id, name, description, input_schema FROM mcp_tools WHERE status = ? ORDER BY call_count DESC LIMIT 200'
+          ).bind('active').all<any>();
+
+          const tools = results.map(t => ({
+            name: t.name,
+            description: t.description || '',
+            inputSchema: JSON.parse(t.input_schema),
+          }));
+
+          return new Response(JSON.stringify({ jsonrpc: '2.0', id: rpcId, result: { tools } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        // tools/call
+        if (rpcBody.method === 'tools/call') {
+          const toolName = rpcBody.params?.name;
+          const args = rpcBody.params?.arguments || {};
+
+          if (!toolName) {
+            return new Response(JSON.stringify({ jsonrpc: '2.0', id: rpcId, error: { code: -32602, message: 'Missing tool name in params' } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+
+          // Auth (optional for MCP)
+          const caller = await authenticateAgent(env, request);
+
+          // Find tool by name (take most popular active one)
+          const tool = await env.DB.prepare(
+            'SELECT * FROM mcp_tools WHERE name = ? AND status = ? ORDER BY call_count DESC LIMIT 1'
+          ).bind(toolName, 'active').first<any>();
+
+          if (!tool) {
+            return new Response(JSON.stringify({ jsonrpc: '2.0', id: rpcId, error: { code: -32601, message: `Tool "${toolName}" not found` } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+
+          // Circuit breaker
+          const cb = await env.DB.prepare('SELECT * FROM mcp_circuit_breakers WHERE tool_id = ?').bind(tool.id).first<any>();
+          if (cb && cb.state === 'open' && Date.now() < new Date(cb.opens_at).getTime()) {
+            return new Response(JSON.stringify({ jsonrpc: '2.0', id: rpcId, error: { code: -32000, message: 'Tool circuit breaker is open' } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+
+          const startTime = Date.now();
+          const traceId = generatePrefixedId('trace');
+          const invocationId = generatePrefixedId('inv');
+          const callerId = caller?.id || 'anonymous';
+
+          // Log
+          await env.DB.prepare(
+            `INSERT INTO mcp_invocations (id, tool_id, caller_agent_id, provider_agent_id, input, status, trace_id)
+             VALUES (?, ?, ?, ?, ?, 'running', ?)`
+          ).bind(invocationId, tool.id, callerId, tool.agent_id, JSON.stringify(args), traceId).run();
+
+          // Proxy
+          const proxyHeaders: Record<string, string> = { 'Content-Type': 'application/json', 'X-NexusCall-Trace-Id': traceId };
+          if (tool.auth_type === 'bearer' && tool.auth_config_encrypted) {
+            try { const ac = JSON.parse(tool.auth_config_encrypted); if (ac.token) proxyHeaders['Authorization'] = `Bearer ${ac.token}`; } catch {}
+          } else if (tool.auth_type === 'api_key' && tool.auth_config_encrypted) {
+            try { const ac = JSON.parse(tool.auth_config_encrypted); if (ac.key) proxyHeaders[ac.headerName || 'X-API-Key'] = ac.key; } catch {}
+          }
+
+          let result: any = null;
+          let isError = false;
+          let errMsg = '';
+
+          try {
+            const controller = new AbortController();
+            const tid = setTimeout(() => controller.abort(), 30000);
+            const resp = await fetch(tool.endpoint, {
+              method: 'POST', headers: proxyHeaders,
+              body: JSON.stringify({ arguments: args, invocationId, traceId }),
+              signal: controller.signal,
+            });
+            clearTimeout(tid);
+            const text = await resp.text();
+            try { result = JSON.parse(text); } catch { result = { raw: text }; }
+            if (!resp.ok) { isError = true; errMsg = `Provider returned ${resp.status}`; }
+          } catch (e: any) {
+            isError = true;
+            errMsg = e.name === 'AbortError' ? 'Timeout' : (e.message || String(e));
+          }
+
+          const latencyMs = Date.now() - startTime;
+          const status = isError ? 'error' : 'success';
+          const completedAt = new Date().toISOString();
+
+          // Update invocation + stats
+          await env.DB.prepare('UPDATE mcp_invocations SET status = ?, output = ?, latency_ms = ?, completed_at = ?, error_message = ? WHERE id = ?')
+            .bind(status, result ? JSON.stringify(result) : null, latencyMs, completedAt, isError ? errMsg : null, invocationId).run();
+
+          const isSuccess = !isError;
+          await env.DB.prepare(
+            `UPDATE mcp_tools SET call_count = call_count + 1,
+              avg_latency_ms = CASE WHEN call_count = 0 THEN ? ELSE (avg_latency_ms * call_count + ?) / (call_count + 1) END,
+              success_rate = CASE WHEN call_count = 0 THEN ? ELSE (success_rate * call_count + ?) / (call_count + 1) END,
+              updated_at = ? WHERE id = ?`
+          ).bind(latencyMs, latencyMs, isSuccess ? 1.0 : 0.0, isSuccess ? 1.0 : 0.0, completedAt, tool.id).run();
+
+          // Circuit breaker
+          if (!isSuccess) {
+            await env.DB.prepare(
+              `INSERT INTO mcp_circuit_breakers (tool_id, state, failure_count, last_failure_at)
+               VALUES (?, 'closed', 1, ?)
+               ON CONFLICT(tool_id) DO UPDATE SET
+                 failure_count = failure_count + 1,
+                 last_failure_at = ?,
+                 state = CASE WHEN failure_count + 1 >= 5 THEN 'open' ELSE state END,
+                 opens_at = CASE WHEN failure_count + 1 >= 5 THEN datetime('now', '+60 seconds') ELSE opens_at END`
+            ).bind(tool.id, completedAt, completedAt).run();
+          } else if (cb) {
+            await env.DB.prepare('UPDATE mcp_circuit_breakers SET state = ?, failure_count = 0 WHERE tool_id = ?').bind('closed', tool.id).run();
+          }
+
+          if (isError) {
+            return new Response(JSON.stringify({ jsonrpc: '2.0', id: rpcId, error: { code: -32000, message: errMsg, data: { invocationId, latencyMs } } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+
+          // MCP tools/call returns content array
+          const content = result?.content || [{ type: 'text', text: JSON.stringify(result) }];
+          return new Response(JSON.stringify({ jsonrpc: '2.0', id: rpcId, result: { content, _meta: { invocationId, latencyMs } } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        // resources/list
+        if (rpcBody.method === 'resources/list') {
+          const { results } = await env.DB.prepare('SELECT id, name, description FROM mcp_tools WHERE status = ? LIMIT 200').bind('active').all<any>();
+          const resources = results.map(t => ({
+            uri: `nxscall://tools/${t.id}/schema`,
+            name: `${t.name} schema`,
+            description: t.description,
+            mimeType: 'application/json',
+          }));
+          return new Response(JSON.stringify({ jsonrpc: '2.0', id: rpcId, result: { resources } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        // resources/read
+        if (rpcBody.method === 'resources/read') {
+          const uri = rpcBody.params?.uri || '';
+          const match = uri.match(/^nxscall:\/\/tools\/([^/]+)\/schema$/);
+          if (!match) {
+            return new Response(JSON.stringify({ jsonrpc: '2.0', id: rpcId, error: { code: -32602, message: 'Invalid resource URI' } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+          const tool = await env.DB.prepare('SELECT input_schema, output_schema FROM mcp_tools WHERE id = ?').bind(match[1]).first<any>();
+          if (!tool) {
+            return new Response(JSON.stringify({ jsonrpc: '2.0', id: rpcId, error: { code: -32602, message: 'Resource not found' } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+          return new Response(JSON.stringify({
+            jsonrpc: '2.0', id: rpcId,
+            result: { contents: [{ uri, mimeType: 'application/json', text: JSON.stringify({ inputSchema: JSON.parse(tool.input_schema), outputSchema: tool.output_schema ? JSON.parse(tool.output_schema) : null }) }] }
+          }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        // Unknown method
+        return new Response(JSON.stringify({ jsonrpc: '2.0', id: rpcId, error: { code: -32601, message: `Method "${rpcBody.method}" not found` } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // Phase 3: Workflow Engine APIs
+      // ============================================
+
+      // POST /api/workflows — Create workflow
+      if (path[0] === 'api' && path[1] === 'workflows' && !path[2] && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const body = await request.json<{
+          name: string; description?: string; steps: any[];
+          inputSchema?: any; outputSchema?: any;
+          errorStrategy?: string; timeoutMs?: number;
+          isPublic?: boolean; status?: string;
+        }>();
+
+        if (!body.name || body.name.length < 1 || body.name.length > 128) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'name required, 1-128 chars' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        if (!body.steps || !Array.isArray(body.steps) || body.steps.length === 0) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'steps must be a non-empty array' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        // Validate each step
+        const stepIds = new Set<string>();
+        for (const step of body.steps) {
+          if (!step.id || !step.toolId) {
+            return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Each step must have id and toolId' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+          if (stepIds.has(step.id)) {
+            return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Duplicate step id: ${step.id}` } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+          stepIds.add(step.id);
+          // Validate dependsOn references
+          if (step.dependsOn) {
+            for (const dep of step.dependsOn) {
+              if (!stepIds.has(dep)) {
+                return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Step "${step.id}" depends on "${dep}" which is not defined before it` } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+              }
+            }
+          }
+        }
+
+        const errorStrategy = body.errorStrategy || 'stop_on_first';
+        if (!['stop_on_first', 'continue', 'retry'].includes(errorStrategy)) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'errorStrategy must be stop_on_first, continue, or retry' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        const timeoutMs = Math.min(body.timeoutMs || 120000, 300000);
+        const wfStatus = body.status || 'draft';
+        if (!['draft', 'active', 'archived'].includes(wfStatus)) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'status must be draft, active, or archived' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        const wfId = generatePrefixedId('wf');
+        await env.DB.prepare(
+          `INSERT INTO workflows (id, agent_id, name, description, definition, input_schema, output_schema, error_strategy, timeout_ms, status, is_public)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          wfId, agent.id, body.name, body.description || null,
+          JSON.stringify({ steps: body.steps }),
+          body.inputSchema ? JSON.stringify(body.inputSchema) : null,
+          body.outputSchema ? JSON.stringify(body.outputSchema) : null,
+          errorStrategy, timeoutMs, wfStatus, body.isPublic ? 1 : 0
+        ).run();
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { id: wfId, name: body.name, status: wfStatus, stepsCount: body.steps.length, createdAt: new Date().toISOString() }
+        }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // GET /api/workflows — List workflows
+      if (path[0] === 'api' && path[1] === 'workflows' && !path[2] && request.method === 'GET') {
+        const agent = await authenticateAgent(env, request);
+        const agentId = url.searchParams.get('agentId') || '';
+        const status = url.searchParams.get('status') || '';
+        const isPublic = url.searchParams.get('public') === 'true';
+        const page = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
+        const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '20')));
+        const offset = (page - 1) * limit;
+
+        let where: string[] = [];
+        let params: any[] = [];
+
+        if (isPublic) {
+          where.push('w.is_public = 1 AND w.status = ?');
+          params.push('active');
+        } else if (agent) {
+          where.push('(w.agent_id = ? OR w.is_public = 1)');
+          params.push(agent.id);
+        } else {
+          where.push('w.is_public = 1 AND w.status = ?');
+          params.push('active');
+        }
+
+        if (agentId) { where.push('w.agent_id = ?'); params.push(agentId); }
+        if (status) { where.push('w.status = ?'); params.push(status); }
+
+        const whereStr = where.length ? where.join(' AND ') : '1=1';
+        const countResult = await env.DB.prepare(`SELECT COUNT(*) as total FROM workflows w WHERE ${whereStr}`).bind(...params).first<{ total: number }>();
+        const total = countResult?.total || 0;
+
+        const { results } = await env.DB.prepare(
+          `SELECT w.id, w.agent_id, w.name, w.description, w.error_strategy, w.timeout_ms, w.status, w.is_public, w.version, w.run_count, w.created_at, w.updated_at,
+                  a.name as agent_name, a.avatar as agent_avatar
+           FROM workflows w JOIN agents a ON w.agent_id = a.id
+           WHERE ${whereStr} ORDER BY w.updated_at DESC LIMIT ? OFFSET ?`
+        ).bind(...params, limit, offset).all<any>();
+
+        return new Response(JSON.stringify({
+          ok: true, data: results, meta: { total, page, limit, pages: Math.ceil(total / limit) }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // GET /api/workflows/:id — Get workflow detail
+      if (path[0] === 'api' && path[1] === 'workflows' && path[2] && !path[3] && request.method === 'GET') {
+        const wf = await env.DB.prepare(
+          `SELECT w.*, a.name as agent_name, a.avatar as agent_avatar
+           FROM workflows w JOIN agents a ON w.agent_id = a.id WHERE w.id = ?`
+        ).bind(path[2]).first<any>();
+
+        if (!wf) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Workflow not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            ...wf,
+            definition: JSON.parse(wf.definition),
+            input_schema: wf.input_schema ? JSON.parse(wf.input_schema) : null,
+            output_schema: wf.output_schema ? JSON.parse(wf.output_schema) : null,
+          }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // PUT /api/workflows/:id — Update workflow
+      if (path[0] === 'api' && path[1] === 'workflows' && path[2] && !path[3] && request.method === 'PUT') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const wf = await env.DB.prepare('SELECT * FROM workflows WHERE id = ?').bind(path[2]).first<any>();
+        if (!wf) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Workflow not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (wf.agent_id !== agent.id) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_INSUFFICIENT_SCOPE', message: 'You can only update your own workflows' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const body = await request.json<any>();
+        const updates: string[] = [];
+        const values: any[] = [];
+
+        if (body.name !== undefined) { updates.push('name = ?'); values.push(body.name); }
+        if (body.description !== undefined) { updates.push('description = ?'); values.push(body.description); }
+        if (body.steps !== undefined) {
+          if (!Array.isArray(body.steps) || body.steps.length === 0) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'steps must be a non-empty array' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          updates.push('definition = ?'); values.push(JSON.stringify({ steps: body.steps }));
+        }
+        if (body.inputSchema !== undefined) { updates.push('input_schema = ?'); values.push(body.inputSchema ? JSON.stringify(body.inputSchema) : null); }
+        if (body.outputSchema !== undefined) { updates.push('output_schema = ?'); values.push(body.outputSchema ? JSON.stringify(body.outputSchema) : null); }
+        if (body.errorStrategy !== undefined) {
+          if (!['stop_on_first', 'continue', 'retry'].includes(body.errorStrategy)) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid errorStrategy' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          updates.push('error_strategy = ?'); values.push(body.errorStrategy);
+        }
+        if (body.timeoutMs !== undefined) { updates.push('timeout_ms = ?'); values.push(Math.min(body.timeoutMs, 300000)); }
+        if (body.status !== undefined) {
+          if (!['draft', 'active', 'archived'].includes(body.status)) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid status' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          updates.push('status = ?'); values.push(body.status);
+        }
+        if (body.isPublic !== undefined) { updates.push('is_public = ?'); values.push(body.isPublic ? 1 : 0); }
+
+        if (updates.length === 0) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        updates.push('updated_at = ?'); values.push(new Date().toISOString());
+        updates.push('version = version + 1');
+        values.push(path[2]);
+
+        await env.DB.prepare(`UPDATE workflows SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+        return new Response(JSON.stringify({ ok: true, data: { id: path[2], updated: true } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // DELETE /api/workflows/:id — Archive workflow
+      if (path[0] === 'api' && path[1] === 'workflows' && path[2] && !path[3] && request.method === 'DELETE') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const wf = await env.DB.prepare('SELECT agent_id FROM workflows WHERE id = ?').bind(path[2]).first<any>();
+        if (!wf) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Workflow not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (wf.agent_id !== agent.id) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_INSUFFICIENT_SCOPE', message: 'You can only delete your own workflows' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        await env.DB.prepare('UPDATE workflows SET status = ?, updated_at = ? WHERE id = ?').bind('archived', new Date().toISOString(), path[2]).run();
+        return new Response(JSON.stringify({ ok: true, data: { id: path[2], status: 'archived' } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // POST /api/workflows/:id/run — Execute workflow
+      if (path[0] === 'api' && path[1] === 'workflows' && path[2] && path[3] === 'run' && !path[4] && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const wf = await env.DB.prepare('SELECT * FROM workflows WHERE id = ?').bind(path[2]).first<any>();
+        if (!wf) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Workflow not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (wf.status !== 'active') return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Workflow must be active to run' } }), { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        // ACL check for workflow execution
+        const wfCallerOrgs = await env.DB.prepare('SELECT org_id FROM org_members WHERE agent_id = ?').bind(agent.id).all<any>();
+        for (const orgRow of (wfCallerOrgs.results || [])) {
+          const aclAllowed = await checkACL(orgRow.org_id, agent.id, `workflow:${path[2]}`, 'execute');
+          if (!aclAllowed) return new Response(JSON.stringify({ ok: false, error: { code: 'ACL_DENIED', message: 'Access denied by organization policy' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        const body = await request.json<{ input?: any }>().catch(() => ({}));
+        const runId = generatePrefixedId('run');
+        const definition = JSON.parse(wf.definition);
+        const steps: any[] = definition.steps || [];
+        const startedAt = new Date().toISOString();
+
+        // Create run record
+        await env.DB.prepare(
+          `INSERT INTO workflow_runs (id, workflow_id, triggered_by, input, status, current_step, step_results, started_at)
+           VALUES (?, ?, ?, ?, 'running', ?, '{}', ?)`
+        ).bind(runId, wf.id, agent.id, JSON.stringify(body.input || {}), steps[0]?.id || null, startedAt).run();
+
+        // Audit + usage tracking
+        await logAudit(null, agent.id, 'workflow:run', 'workflow', wf.id, { runId });
+        for (const orgRow of (wfCallerOrgs.results || [])) {
+          await trackUsage(orgRow.org_id, agent.id, 'workflow_runs', 1);
+        }
+
+        // Execute steps sequentially (within Workers CPU limits)
+        const stepResults: Record<string, any> = {};
+        let workflowOutput: any = null;
+        let workflowError: string | null = null;
+        let workflowStatus: string = 'success';
+        let currentStepId: string | null = null;
+        const workflowStartTime = Date.now();
+
+        // Build context with input
+        const context: Record<string, any> = { input: body.input || {} };
+
+        for (let i = 0; i < steps.length; i++) {
+          const step = steps[i];
+          currentStepId = step.id;
+
+          // Check workflow timeout
+          if (Date.now() - workflowStartTime > wf.timeout_ms) {
+            stepResults[step.id] = { status: 'skipped', error: 'Workflow timeout exceeded' };
+            workflowStatus = 'failed';
+            workflowError = `Workflow timeout after ${wf.timeout_ms}ms`;
+            break;
+          }
+
+          // Check dependencies (for DAG support)
+          if (step.dependsOn && Array.isArray(step.dependsOn)) {
+            const unmetDeps = step.dependsOn.filter((dep: string) => !stepResults[dep] || stepResults[dep].status !== 'success');
+            if (unmetDeps.length > 0) {
+              if (wf.error_strategy === 'continue') {
+                stepResults[step.id] = { status: 'skipped', error: `Unmet dependencies: ${unmetDeps.join(', ')}` };
+                continue;
+              } else {
+                stepResults[step.id] = { status: 'skipped', error: `Unmet dependencies: ${unmetDeps.join(', ')}` };
+                workflowStatus = 'failed';
+                workflowError = `Step "${step.id}" has unmet dependencies: ${unmetDeps.join(', ')}`;
+                break;
+              }
+            }
+          }
+
+          // Evaluate condition (if/else branching)
+          if (step.condition) {
+            try {
+              const condResult = evaluateCondition(step.condition, context);
+              if (!condResult) {
+                stepResults[step.id] = { status: 'skipped', reason: 'Condition not met' };
+                context.steps = { ...context.steps, [step.id]: { status: 'skipped' } };
+                continue;
+              }
+            } catch (e: any) {
+              stepResults[step.id] = { status: 'error', error: `Condition evaluation failed: ${e.message}` };
+              if (wf.error_strategy === 'stop_on_first') { workflowStatus = 'failed'; workflowError = `Condition error in step "${step.id}"`; break; }
+              continue;
+            }
+          }
+
+          // Update current step
+          await env.DB.prepare('UPDATE workflow_runs SET current_step = ?, step_results = ? WHERE id = ?')
+            .bind(step.id, JSON.stringify(stepResults), runId).run();
+
+          // Resolve arguments with template expressions
+          const resolvedArgs = resolveTemplate(step.arguments || {}, context);
+
+          // Execute step (invoke tool)
+          const stepStart = Date.now();
+          const stepTimeout = step.timeoutMs || 30000;
+          let retries = 0;
+          const maxRetries = (wf.error_strategy === 'retry') ? (step.maxRetries || 2) : 0;
+          let stepResult: any = null;
+          let stepError: string | null = null;
+          let stepStatus: string = 'success';
+
+          while (retries <= maxRetries) {
+            try {
+              // Fetch tool
+              const tool = await env.DB.prepare('SELECT * FROM mcp_tools WHERE id = ? AND status = ?').bind(step.toolId, 'active').first<any>();
+              if (!tool) { stepStatus = 'error'; stepError = `Tool ${step.toolId} not found or inactive`; break; }
+
+              // Build proxy request
+              const proxyHeaders: Record<string, string> = { 'Content-Type': 'application/json', 'X-NexusCall-Workflow-Run': runId, 'X-NexusCall-Step': step.id };
+              if (tool.auth_type === 'bearer' && tool.auth_config_encrypted) {
+                try { const ac = JSON.parse(tool.auth_config_encrypted); if (ac.token) proxyHeaders['Authorization'] = `Bearer ${ac.token}`; } catch {}
+              } else if (tool.auth_type === 'api_key' && tool.auth_config_encrypted) {
+                try { const ac = JSON.parse(tool.auth_config_encrypted); if (ac.key) proxyHeaders[ac.headerName || 'X-API-Key'] = ac.key; } catch {}
+              }
+
+              const controller = new AbortController();
+              const tid = setTimeout(() => controller.abort(), stepTimeout);
+              const resp = await fetch(tool.endpoint, {
+                method: 'POST', headers: proxyHeaders,
+                body: JSON.stringify({ arguments: resolvedArgs, workflowRunId: runId, stepId: step.id }),
+                signal: controller.signal,
+              });
+              clearTimeout(tid);
+
+              const text = await resp.text();
+              try { stepResult = JSON.parse(text); } catch { stepResult = { raw: text }; }
+
+              if (!resp.ok) {
+                stepStatus = 'error';
+                stepError = `Tool returned ${resp.status}`;
+                if (retries < maxRetries) { retries++; await new Promise(r => setTimeout(r, 1000 * retries)); continue; }
+              } else {
+                stepStatus = 'success';
+                stepError = null;
+              }
+              break;
+            } catch (e: any) {
+              stepStatus = 'error';
+              stepError = e.name === 'AbortError' ? `Step timeout (${stepTimeout}ms)` : (e.message || String(e));
+              if (retries < maxRetries) { retries++; await new Promise(r => setTimeout(r, 1000 * retries)); continue; }
+              break;
+            }
+          }
+
+          const stepLatency = Date.now() - stepStart;
+          stepResults[step.id] = { status: stepStatus, result: stepResult, error: stepError, latencyMs: stepLatency, retries };
+
+          // Update context for next steps
+          if (!context.steps) context.steps = {};
+          context.steps[step.id] = { status: stepStatus, result: stepResult };
+
+          // Apply output mapping if defined
+          if (step.outputMapping && stepResult) {
+            for (const [key, expr] of Object.entries(step.outputMapping)) {
+              context.steps[step.id][key] = resolveTemplate(expr, { ...context, result: stepResult });
+            }
+          }
+
+          if (stepStatus !== 'success') {
+            if (wf.error_strategy === 'stop_on_first') {
+              workflowStatus = 'failed';
+              workflowError = `Step "${step.id}" failed: ${stepError}`;
+              break;
+            }
+            // 'continue' strategy — keep going
+          }
+
+          // Last step output becomes workflow output
+          if (i === steps.length - 1 && stepStatus === 'success') {
+            workflowOutput = stepResult;
+          }
+        }
+
+        // If all steps done and no failure recorded
+        if (workflowStatus === 'success') {
+          // Check if any step failed in 'continue' mode
+          const failedSteps = Object.entries(stepResults).filter(([, r]: [string, any]) => r.status === 'error');
+          if (failedSteps.length > 0 && wf.error_strategy !== 'continue') {
+            workflowStatus = 'failed';
+          }
+          // Get last successful step output
+          const lastSuccessStep = [...steps].reverse().find(s => stepResults[s.id]?.status === 'success');
+          if (lastSuccessStep) workflowOutput = stepResults[lastSuccessStep.id]?.result;
+        }
+
+        const completedAt = new Date().toISOString();
+
+        // Update run
+        await env.DB.prepare(
+          `UPDATE workflow_runs SET status = ?, output = ?, step_results = ?, error = ?, current_step = NULL, completed_at = ? WHERE id = ?`
+        ).bind(workflowStatus, workflowOutput ? JSON.stringify(workflowOutput) : null, JSON.stringify(stepResults), workflowError, completedAt, runId).run();
+
+        // Update workflow run count
+        await env.DB.prepare('UPDATE workflows SET run_count = run_count + 1, updated_at = ? WHERE id = ?').bind(completedAt, wf.id).run();
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            runId, workflowId: wf.id, status: workflowStatus,
+            output: workflowOutput,
+            stepResults,
+            error: workflowError,
+            startedAt, completedAt,
+            totalLatencyMs: Date.now() - workflowStartTime,
+          }
+        }), { status: workflowStatus === 'success' ? 200 : 207, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // GET /api/workflows/:id/runs — List workflow runs
+      if (path[0] === 'api' && path[1] === 'workflows' && path[2] && path[3] === 'runs' && !path[4] && request.method === 'GET') {
+        const page = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
+        const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '20')));
+        const offset = (page - 1) * limit;
+        const status = url.searchParams.get('status') || '';
+
+        let where = 'r.workflow_id = ?';
+        let params: any[] = [path[2]];
+        if (status) { where += ' AND r.status = ?'; params.push(status); }
+
+        const countResult = await env.DB.prepare(`SELECT COUNT(*) as total FROM workflow_runs r WHERE ${where}`).bind(...params).first<{ total: number }>();
+        const total = countResult?.total || 0;
+
+        const { results } = await env.DB.prepare(
+          `SELECT r.id, r.workflow_id, r.triggered_by, r.status, r.current_step, r.error, r.started_at, r.completed_at, r.created_at,
+                  a.name as triggered_by_name
+           FROM workflow_runs r JOIN agents a ON r.triggered_by = a.id
+           WHERE ${where} ORDER BY r.created_at DESC LIMIT ? OFFSET ?`
+        ).bind(...params, limit, offset).all<any>();
+
+        return new Response(JSON.stringify({ ok: true, data: results, meta: { total, page, limit, pages: Math.ceil(total / limit) } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // GET /api/workflow-runs/:runId — Get run detail
+      if (path[0] === 'api' && path[1] === 'workflow-runs' && path[2] && !path[3] && request.method === 'GET') {
+        const run = await env.DB.prepare(
+          `SELECT r.*, w.name as workflow_name, a.name as triggered_by_name
+           FROM workflow_runs r
+           JOIN workflows w ON r.workflow_id = w.id
+           JOIN agents a ON r.triggered_by = a.id
+           WHERE r.id = ?`
+        ).bind(path[2]).first<any>();
+
+        if (!run) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Workflow run not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            ...run,
+            input: run.input ? JSON.parse(run.input) : null,
+            output: run.output ? JSON.parse(run.output) : null,
+            step_results: run.step_results ? JSON.parse(run.step_results) : {},
+          }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // POST /api/workflow-runs/:runId/cancel — Cancel running workflow
+      if (path[0] === 'api' && path[1] === 'workflow-runs' && path[2] && path[3] === 'cancel' && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const run = await env.DB.prepare('SELECT * FROM workflow_runs WHERE id = ?').bind(path[2]).first<any>();
+        if (!run) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Run not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (run.triggered_by !== agent.id) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_INSUFFICIENT_SCOPE', message: 'Only the triggering agent can cancel' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (!['pending', 'running'].includes(run.status)) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Can only cancel pending or running workflows' } }), { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        await env.DB.prepare('UPDATE workflow_runs SET status = ?, completed_at = ? WHERE id = ?').bind('cancelled', new Date().toISOString(), path[2]).run();
+        return new Response(JSON.stringify({ ok: true, data: { id: path[2], status: 'cancelled' } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // Phase 3: Agent Handoff Protocol
+      // ============================================
+
+      // POST /api/handoffs — Initiate handoff
+      if (path[0] === 'api' && path[1] === 'handoffs' && !path[2] && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const body = await request.json<{ toAgentId: string; context: any; message?: string; workflowRunId?: string }>();
+        if (!body.toAgentId) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'toAgentId is required' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (!body.context || typeof body.context !== 'object') return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'context must be an object' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        // Verify target agent exists
+        const toAgent = await env.DB.prepare('SELECT id, name FROM agents WHERE id = ?').bind(body.toAgentId).first<any>();
+        if (!toAgent) return new Response(JSON.stringify({ ok: false, error: { code: 'AGENT_NOT_FOUND', message: `Agent ${body.toAgentId} not found` } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const hoId = generatePrefixedId('ho');
+        await env.DB.prepare(
+          `INSERT INTO handoffs (id, from_agent_id, to_agent_id, workflow_run_id, context, message, status)
+           VALUES (?, ?, ?, ?, ?, ?, 'pending')`
+        ).bind(hoId, agent.id, body.toAgentId, body.workflowRunId || null, JSON.stringify(body.context), body.message || null).run();
+
+        await logAudit(null, agent.id, 'handoff:create', 'handoff', hoId, { toAgentId: body.toAgentId });
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { id: hoId, fromAgentId: agent.id, toAgentId: body.toAgentId, status: 'pending', createdAt: new Date().toISOString() }
+        }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // GET /api/handoffs — List handoffs (for authenticated agent)
+      if (path[0] === 'api' && path[1] === 'handoffs' && !path[2] && request.method === 'GET') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const direction = url.searchParams.get('direction') || 'incoming'; // incoming | outgoing | all
+        const status = url.searchParams.get('status') || '';
+        const page = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
+        const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '20')));
+        const offset = (page - 1) * limit;
+
+        let where: string;
+        let params: any[];
+        if (direction === 'outgoing') { where = 'h.from_agent_id = ?'; params = [agent.id]; }
+        else if (direction === 'all') { where = '(h.from_agent_id = ? OR h.to_agent_id = ?)'; params = [agent.id, agent.id]; }
+        else { where = 'h.to_agent_id = ?'; params = [agent.id]; }
+
+        if (status) { where += ' AND h.status = ?'; params.push(status); }
+
+        const countResult = await env.DB.prepare(`SELECT COUNT(*) as total FROM handoffs h WHERE ${where}`).bind(...params).first<{ total: number }>();
+        const total = countResult?.total || 0;
+
+        const { results } = await env.DB.prepare(
+          `SELECT h.id, h.from_agent_id, h.to_agent_id, h.workflow_run_id, h.message, h.status, h.created_at, h.resolved_at,
+                  fa.name as from_agent_name, ta.name as to_agent_name
+           FROM handoffs h
+           JOIN agents fa ON h.from_agent_id = fa.id
+           JOIN agents ta ON h.to_agent_id = ta.id
+           WHERE ${where} ORDER BY h.created_at DESC LIMIT ? OFFSET ?`
+        ).bind(...params, limit, offset).all<any>();
+
+        return new Response(JSON.stringify({ ok: true, data: results, meta: { total, page, limit, pages: Math.ceil(total / limit) } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // GET /api/handoffs/:id — Get handoff detail
+      if (path[0] === 'api' && path[1] === 'handoffs' && path[2] && !path[3] && request.method === 'GET') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const ho = await env.DB.prepare(
+          `SELECT h.*, fa.name as from_agent_name, ta.name as to_agent_name
+           FROM handoffs h JOIN agents fa ON h.from_agent_id = fa.id JOIN agents ta ON h.to_agent_id = ta.id WHERE h.id = ?`
+        ).bind(path[2]).first<any>();
+
+        if (!ho) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Handoff not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (ho.from_agent_id !== agent.id && ho.to_agent_id !== agent.id) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_INSUFFICIENT_SCOPE', message: 'Not authorized' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { ...ho, context: JSON.parse(ho.context), result: ho.result ? JSON.parse(ho.result) : null }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // POST /api/handoffs/:id/accept — Accept handoff
+      if (path[0] === 'api' && path[1] === 'handoffs' && path[2] && path[3] === 'accept' && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const ho = await env.DB.prepare('SELECT * FROM handoffs WHERE id = ?').bind(path[2]).first<any>();
+        if (!ho) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Handoff not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (ho.to_agent_id !== agent.id) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_INSUFFICIENT_SCOPE', message: 'Only the target agent can accept' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (ho.status !== 'pending') return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Handoff is not pending' } }), { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        await env.DB.prepare('UPDATE handoffs SET status = ?, resolved_at = ? WHERE id = ?').bind('accepted', new Date().toISOString(), path[2]).run();
+        return new Response(JSON.stringify({ ok: true, data: { id: path[2], status: 'accepted', context: JSON.parse(ho.context) } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // POST /api/handoffs/:id/reject — Reject handoff
+      if (path[0] === 'api' && path[1] === 'handoffs' && path[2] && path[3] === 'reject' && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const ho = await env.DB.prepare('SELECT * FROM handoffs WHERE id = ?').bind(path[2]).first<any>();
+        if (!ho) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Handoff not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (ho.to_agent_id !== agent.id) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_INSUFFICIENT_SCOPE', message: 'Only the target agent can reject' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (ho.status !== 'pending') return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Handoff is not pending' } }), { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const body = await request.json<{ reason?: string }>().catch(() => ({}));
+        await env.DB.prepare('UPDATE handoffs SET status = ?, resolved_at = ?, result = ? WHERE id = ?')
+          .bind('rejected', new Date().toISOString(), JSON.stringify({ reason: body.reason || 'Rejected' }), path[2]).run();
+
+        return new Response(JSON.stringify({ ok: true, data: { id: path[2], status: 'rejected' } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // POST /api/handoffs/:id/complete — Complete handoff with result
+      if (path[0] === 'api' && path[1] === 'handoffs' && path[2] && path[3] === 'complete' && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const ho = await env.DB.prepare('SELECT * FROM handoffs WHERE id = ?').bind(path[2]).first<any>();
+        if (!ho) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Handoff not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (ho.to_agent_id !== agent.id) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_INSUFFICIENT_SCOPE', message: 'Only the target agent can complete' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (ho.status !== 'accepted') return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Handoff must be accepted first' } }), { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const body = await request.json<{ result: any }>().catch(() => ({ result: {} }));
+        await env.DB.prepare('UPDATE handoffs SET status = ?, result = ?, resolved_at = ? WHERE id = ?')
+          .bind('completed', JSON.stringify(body.result), new Date().toISOString(), path[2]).run();
+
+        return new Response(JSON.stringify({ ok: true, data: { id: path[2], status: 'completed' } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
       // GET /api/tools/:toolId/schema — Tool의 input/output 스키마
       if (path[0] === 'api' && path[1] === 'tools' && path[2] && path[3] === 'schema' && request.method === 'GET') {
         const toolId = path[2];
@@ -1031,6 +2214,480 @@ export default {
             inputSchema: JSON.parse(tool.input_schema),
             outputSchema: tool.output_schema ? JSON.parse(tool.output_schema) : null,
           }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // Phase 4: B2B Features — Organizations, ACL, Audit, Billing, Admin
+      // ============================================
+
+      // ============================================
+      // POST /api/orgs — Create organization
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && !path[2] && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const body = await request.json<{ name: string; slug?: string }>().catch(() => null);
+        if (!body?.name) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'name is required' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const slug = body.slug || body.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+        if (!/^[a-z0-9][a-z0-9-]{1,62}[a-z0-9]$/.test(slug)) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid slug format' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const orgId = generatePrefixedId('org');
+        try {
+          await env.DB.prepare(
+            `INSERT INTO organizations (id, name, slug) VALUES (?, ?, ?)`
+          ).bind(orgId, body.name, slug).run();
+          // Creator becomes owner
+          await env.DB.prepare(
+            `INSERT INTO org_members (org_id, agent_id, role, invited_by) VALUES (?, ?, 'owner', ?)`
+          ).bind(orgId, agent.id, agent.id).run();
+          await logAudit(orgId, agent.id, 'org:create', 'org', orgId, { name: body.name, slug });
+        } catch (e: any) {
+          if (e.message?.includes('UNIQUE')) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Slug already taken' } }), { status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          throw e;
+        }
+
+        return new Response(JSON.stringify({ ok: true, data: { id: orgId, name: body.name, slug, plan: 'free', createdAt: new Date().toISOString() } }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // GET /api/orgs — List my organizations
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && !path[2] && request.method === 'GET') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const { results } = await env.DB.prepare(
+          `SELECT o.*, om.role FROM organizations o JOIN org_members om ON o.id = om.org_id WHERE om.agent_id = ? ORDER BY o.created_at DESC`
+        ).bind(agent.id).all<any>();
+
+        return new Response(JSON.stringify({ ok: true, data: results, meta: { total: results.length } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // GET /api/orgs/:orgId — Get org detail
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && path[2] && !path[3] && request.method === 'GET') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const membership = await getOrgMembership(path[2], agent.id);
+        if (!membership) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Not a member of this org' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const org = await env.DB.prepare('SELECT * FROM organizations WHERE id = ?').bind(path[2]).first<any>();
+        if (!org) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Organization not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const { results: members } = await env.DB.prepare(
+          `SELECT om.agent_id, om.role, om.joined_at, a.name as agent_name, a.avatar FROM org_members om JOIN agents a ON om.agent_id = a.id WHERE om.org_id = ?`
+        ).bind(path[2]).all<any>();
+
+        return new Response(JSON.stringify({ ok: true, data: { ...org, settings: org.settings ? JSON.parse(org.settings) : {}, members, myRole: membership.role } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // PUT /api/orgs/:orgId — Update org
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && path[2] && !path[3] && request.method === 'PUT') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const membership = await getOrgMembership(path[2], agent.id);
+        if (!membership || !hasRole(membership.role, 'admin')) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin role required' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const body = await request.json<{ name?: string; settings?: any }>().catch(() => ({})) as { name?: string; settings?: any };
+        const updates: string[] = [];
+        const values: any[] = [];
+        if (body.name) { updates.push('name = ?'); values.push(body.name); }
+        if (body.settings !== undefined) { updates.push('settings = ?'); values.push(JSON.stringify(body.settings)); }
+        if (updates.length === 0) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Nothing to update' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        updates.push("updated_at = datetime('now')");
+        values.push(path[2]);
+        await env.DB.prepare(`UPDATE organizations SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+        await logAudit(path[2], agent.id, 'org:update', 'org', path[2], body);
+
+        const org = await env.DB.prepare('SELECT * FROM organizations WHERE id = ?').bind(path[2]).first<any>();
+        return new Response(JSON.stringify({ ok: true, data: org }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // POST /api/orgs/:orgId/members — Add member
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && path[2] && path[3] === 'members' && !path[4] && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const membership = await getOrgMembership(path[2], agent.id);
+        if (!membership || !hasRole(membership.role, 'admin')) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin role required' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const body = await request.json<{ agentId: string; role?: string }>().catch(() => null);
+        if (!body?.agentId) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'agentId is required' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const role = body.role || 'member';
+        if (!['viewer', 'member', 'admin'].includes(role)) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Invalid role. Use: viewer, member, admin' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        // Can't assign owner role via this endpoint
+        const targetAgent = await env.DB.prepare('SELECT id, name FROM agents WHERE id = ?').bind(body.agentId).first<any>();
+        if (!targetAgent) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Agent not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        try {
+          await env.DB.prepare(
+            `INSERT INTO org_members (org_id, agent_id, role, invited_by) VALUES (?, ?, ?, ?)`
+          ).bind(path[2], body.agentId, role, agent.id).run();
+        } catch (e: any) {
+          if (e.message?.includes('UNIQUE') || e.message?.includes('PRIMARY')) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Agent is already a member' } }), { status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          throw e;
+        }
+
+        await logAudit(path[2], agent.id, 'org:member_add', 'member', body.agentId, { role });
+        return new Response(JSON.stringify({ ok: true, data: { orgId: path[2], agentId: body.agentId, role } }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // PUT /api/orgs/:orgId/members/:agentId — Update member role
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && path[2] && path[3] === 'members' && path[4] && !path[5] && request.method === 'PUT') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const membership = await getOrgMembership(path[2], agent.id);
+        if (!membership || !hasRole(membership.role, 'owner')) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Owner role required to change roles' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const body = await request.json<{ role: string }>().catch(() => null);
+        if (!body?.role || !['viewer', 'member', 'admin'].includes(body.role)) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Valid role required: viewer, member, admin' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const result = await env.DB.prepare('UPDATE org_members SET role = ? WHERE org_id = ? AND agent_id = ?').bind(body.role, path[2], path[4]).run();
+        if (!result.meta.changes) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Member not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        await logAudit(path[2], agent.id, 'org:member_role_change', 'member', path[4], { newRole: body.role });
+        return new Response(JSON.stringify({ ok: true, data: { orgId: path[2], agentId: path[4], role: body.role } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // DELETE /api/orgs/:orgId/members/:agentId — Remove member
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && path[2] && path[3] === 'members' && path[4] && !path[5] && request.method === 'DELETE') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const membership = await getOrgMembership(path[2], agent.id);
+        if (!membership || !hasRole(membership.role, 'admin')) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin role required' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        // Can't remove owner
+        const target = await getOrgMembership(path[2], path[4]);
+        if (target?.role === 'owner') return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Cannot remove org owner' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        await env.DB.prepare('DELETE FROM org_members WHERE org_id = ? AND agent_id = ?').bind(path[2], path[4]).run();
+        await logAudit(path[2], agent.id, 'org:member_remove', 'member', path[4], null);
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // POST /api/orgs/:orgId/policies — Create ACL policy
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && path[2] && path[3] === 'policies' && !path[4] && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const membership = await getOrgMembership(path[2], agent.id);
+        if (!membership || !hasRole(membership.role, 'admin')) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin role required' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const body = await request.json<{ name: string; description?: string; rules: any[]; priority?: number }>().catch(() => null);
+        if (!body?.name || !body?.rules || !Array.isArray(body.rules)) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'name and rules[] are required' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        // Validate rules structure
+        for (const rule of body.rules) {
+          if (!rule.effect || !['allow', 'deny'].includes(rule.effect)) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Each rule must have effect: allow|deny' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          if (!rule.resource) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Each rule must have a resource pattern' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        const policyId = generatePrefixedId('pol');
+        await env.DB.prepare(
+          `INSERT INTO access_policies (id, org_id, name, description, rules, priority) VALUES (?, ?, ?, ?, ?, ?)`
+        ).bind(policyId, path[2], body.name, body.description || null, JSON.stringify(body.rules), body.priority ?? 0).run();
+        await logAudit(path[2], agent.id, 'acl:create', 'acl', policyId, { name: body.name });
+
+        return new Response(JSON.stringify({ ok: true, data: { id: policyId, orgId: path[2], name: body.name, rules: body.rules, priority: body.priority ?? 0, status: 'active' } }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // GET /api/orgs/:orgId/policies — List ACL policies
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && path[2] && path[3] === 'policies' && !path[4] && request.method === 'GET') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const membership = await getOrgMembership(path[2], agent.id);
+        if (!membership || !hasRole(membership.role, 'member')) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Member role required' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const { results } = await env.DB.prepare(
+          `SELECT * FROM access_policies WHERE org_id = ? ORDER BY priority DESC, created_at DESC`
+        ).bind(path[2]).all<any>();
+
+        const parsed = results.map((p: any) => ({ ...p, rules: JSON.parse(p.rules) }));
+        return new Response(JSON.stringify({ ok: true, data: parsed, meta: { total: parsed.length } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // PUT /api/orgs/:orgId/policies/:policyId — Update ACL policy
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && path[2] && path[3] === 'policies' && path[4] && !path[5] && request.method === 'PUT') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const membership = await getOrgMembership(path[2], agent.id);
+        if (!membership || !hasRole(membership.role, 'admin')) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin role required' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const body = await request.json<{ name?: string; description?: string; rules?: any[]; priority?: number; status?: string }>().catch(() => ({})) as { name?: string; description?: string; rules?: any[]; priority?: number; status?: string };
+        const updates: string[] = [];
+        const values: any[] = [];
+
+        if (body.name) { updates.push('name = ?'); values.push(body.name); }
+        if (body.description !== undefined) { updates.push('description = ?'); values.push(body.description); }
+        if (body.rules) { updates.push('rules = ?'); values.push(JSON.stringify(body.rules)); }
+        if (body.priority !== undefined) { updates.push('priority = ?'); values.push(body.priority); }
+        if (body.status && ['active', 'inactive'].includes(body.status)) { updates.push('status = ?'); values.push(body.status); }
+
+        if (updates.length === 0) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Nothing to update' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        updates.push("updated_at = datetime('now')");
+        values.push(path[4], path[2]);
+        await env.DB.prepare(`UPDATE access_policies SET ${updates.join(', ')} WHERE id = ? AND org_id = ?`).bind(...values).run();
+        await logAudit(path[2], agent.id, 'acl:update', 'acl', path[4], body);
+
+        const policy = await env.DB.prepare('SELECT * FROM access_policies WHERE id = ? AND org_id = ?').bind(path[4], path[2]).first<any>();
+        return new Response(JSON.stringify({ ok: true, data: policy ? { ...policy, rules: JSON.parse(policy.rules) } : null }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // DELETE /api/orgs/:orgId/policies/:policyId — Delete ACL policy
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && path[2] && path[3] === 'policies' && path[4] && !path[5] && request.method === 'DELETE') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const membership = await getOrgMembership(path[2], agent.id);
+        if (!membership || !hasRole(membership.role, 'admin')) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin role required' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        await env.DB.prepare('DELETE FROM access_policies WHERE id = ? AND org_id = ?').bind(path[4], path[2]).run();
+        await logAudit(path[2], agent.id, 'acl:delete', 'acl', path[4], null);
+        return new Response(JSON.stringify({ ok: true }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // GET /api/orgs/:orgId/audit — Query audit logs
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && path[2] && path[3] === 'audit' && !path[4] && request.method === 'GET') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const membership = await getOrgMembership(path[2], agent.id);
+        if (!membership || !hasRole(membership.role, 'admin')) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Admin role required to view audit logs' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const params = url.searchParams;
+        const conditions: string[] = ['org_id = ?'];
+        const values: any[] = [path[2]];
+
+        if (params.get('action')) { conditions.push('action = ?'); values.push(params.get('action')!); }
+        if (params.get('agentId')) { conditions.push('agent_id = ?'); values.push(params.get('agentId')!); }
+        if (params.get('resourceType')) { conditions.push('resource_type = ?'); values.push(params.get('resourceType')!); }
+        if (params.get('resourceId')) { conditions.push('resource_id = ?'); values.push(params.get('resourceId')!); }
+        if (params.get('from')) { conditions.push('created_at >= ?'); values.push(params.get('from')!); }
+        if (params.get('to')) { conditions.push('created_at <= ?'); values.push(params.get('to')!); }
+
+        const page = Math.max(1, parseInt(params.get('page') || '1'));
+        const limit = Math.min(100, Math.max(1, parseInt(params.get('limit') || '50')));
+        const offset = (page - 1) * limit;
+
+        const where = conditions.join(' AND ');
+        const countResult = await env.DB.prepare(`SELECT COUNT(*) as total FROM audit_logs WHERE ${where}`).bind(...values).first<any>();
+        const { results } = await env.DB.prepare(
+          `SELECT al.*, a.name as agent_name FROM audit_logs al LEFT JOIN agents a ON al.agent_id = a.id WHERE ${where} ORDER BY al.created_at DESC LIMIT ? OFFSET ?`
+        ).bind(...values, limit, offset).all<any>();
+
+        const parsed = results.map((l: any) => ({ ...l, details: l.details ? JSON.parse(l.details) : null }));
+        return new Response(JSON.stringify({ ok: true, data: parsed, meta: { total: countResult?.total || 0, page, limit, pages: Math.ceil((countResult?.total || 0) / limit) } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // GET /api/orgs/:orgId/usage — Usage summary
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && path[2] && path[3] === 'usage' && !path[4] && request.method === 'GET') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const membership = await getOrgMembership(path[2], agent.id);
+        if (!membership || !hasRole(membership.role, 'member')) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Member role required' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const period = url.searchParams.get('period') || new Date().toISOString().substring(0, 7);
+
+        // Aggregate by metric
+        const { results: summary } = await env.DB.prepare(
+          `SELECT metric, SUM(quantity) as total, COUNT(*) as records FROM usage_records WHERE org_id = ? AND period = ? GROUP BY metric`
+        ).bind(path[2], period).all<any>();
+
+        // Aggregate by agent
+        const { results: byAgent } = await env.DB.prepare(
+          `SELECT agent_id, metric, SUM(quantity) as total FROM usage_records WHERE org_id = ? AND period = ? GROUP BY agent_id, metric`
+        ).bind(path[2], period).all<any>();
+
+        // Get plan limits
+        const org = await env.DB.prepare('SELECT plan FROM organizations WHERE id = ?').bind(path[2]).first<any>();
+        const plan = await env.DB.prepare('SELECT * FROM billing_plans WHERE name = ?').bind(org?.plan || 'free').first<any>();
+        const limits = plan?.limits ? JSON.parse(plan.limits) : {};
+
+        return new Response(JSON.stringify({ ok: true, data: { period, summary, byAgent, plan: org?.plan || 'free', limits } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // GET /api/orgs/:orgId/billing — Get billing plan info
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && path[2] && path[3] === 'billing' && !path[4] && request.method === 'GET') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const membership = await getOrgMembership(path[2], agent.id);
+        if (!membership || !hasRole(membership.role, 'member')) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Member role required' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const org = await env.DB.prepare('SELECT * FROM organizations WHERE id = ?').bind(path[2]).first<any>();
+        const plan = await env.DB.prepare('SELECT * FROM billing_plans WHERE name = ?').bind(org?.plan || 'free').first<any>();
+        const { results: allPlans } = await env.DB.prepare('SELECT * FROM billing_plans WHERE is_active = 1 ORDER BY price_usd ASC').all<any>();
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            currentPlan: plan ? { ...plan, limits: JSON.parse(plan.limits) } : null,
+            stripeCustomerId: hasRole(membership.role, 'owner') ? org?.stripe_customer_id : undefined,
+            availablePlans: allPlans.map((p: any) => ({ ...p, limits: JSON.parse(p.limits) })),
+          }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // PUT /api/orgs/:orgId/billing — Change plan
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'orgs' && path[2] && path[3] === 'billing' && !path[4] && request.method === 'PUT') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const membership = await getOrgMembership(path[2], agent.id);
+        if (!membership || !hasRole(membership.role, 'owner')) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Owner role required to change billing plan' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const body = await request.json<{ plan: string; stripeCustomerId?: string }>().catch(() => null);
+        if (!body?.plan) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'plan is required' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const targetPlan = await env.DB.prepare('SELECT * FROM billing_plans WHERE name = ? AND is_active = 1').bind(body.plan).first<any>();
+        if (!targetPlan) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Plan not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const updates = ['plan = ?', "updated_at = datetime('now')"];
+        const values: any[] = [body.plan];
+        if (body.stripeCustomerId) { updates.push('stripe_customer_id = ?'); values.push(body.stripeCustomerId); }
+        values.push(path[2]);
+
+        await env.DB.prepare(`UPDATE organizations SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+        await logAudit(path[2], agent.id, 'billing:plan_change', 'org', path[2], { newPlan: body.plan });
+
+        return new Response(JSON.stringify({ ok: true, data: { orgId: path[2], plan: body.plan } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // GET /api/admin/stats — Platform-wide statistics (admin only)
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'admin' && path[2] === 'stats' && !path[3] && request.method === 'GET') {
+        const adminKey = request.headers.get('X-Admin-Key') || request.headers.get('X-API-Key') || '';
+        if (adminKey !== env.ADMIN_API_KEY) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Admin API key required' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const agents = await env.DB.prepare('SELECT COUNT(*) as total FROM agents').first<any>();
+        const orgs = await env.DB.prepare('SELECT COUNT(*) as total FROM organizations').first<any>();
+        const tools = await env.DB.prepare('SELECT COUNT(*) as total FROM mcp_tools WHERE status = ?').bind('active').first<any>();
+        const invocations = await env.DB.prepare('SELECT COUNT(*) as total FROM mcp_invocations').first<any>();
+        const workflows = await env.DB.prepare('SELECT COUNT(*) as total FROM workflows WHERE status = ?').bind('active').first<any>();
+        const runs = await env.DB.prepare('SELECT COUNT(*) as total FROM workflow_runs').first<any>();
+        const handoffs = await env.DB.prepare('SELECT COUNT(*) as total FROM handoffs').first<any>();
+        const orgsByPlan = await env.DB.prepare('SELECT plan, COUNT(*) as count FROM organizations GROUP BY plan').all<any>();
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            agents: agents?.total || 0,
+            organizations: orgs?.total || 0,
+            activeTools: tools?.total || 0,
+            totalInvocations: invocations?.total || 0,
+            activeWorkflows: workflows?.total || 0,
+            totalWorkflowRuns: runs?.total || 0,
+            totalHandoffs: handoffs?.total || 0,
+            orgsByPlan: orgsByPlan.results || [],
+          }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // GET /api/admin/orgs — List all organizations (admin only)
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'admin' && path[2] === 'orgs' && !path[3] && request.method === 'GET') {
+        const adminKey = request.headers.get('X-Admin-Key') || request.headers.get('X-API-Key') || '';
+        if (adminKey !== env.ADMIN_API_KEY) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Admin API key required' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const page = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
+        const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '20')));
+        const offset = (page - 1) * limit;
+
+        const countResult = await env.DB.prepare('SELECT COUNT(*) as total FROM organizations').first<any>();
+        const { results } = await env.DB.prepare(
+          `SELECT o.*, (SELECT COUNT(*) FROM org_members WHERE org_id = o.id) as member_count FROM organizations o ORDER BY o.created_at DESC LIMIT ? OFFSET ?`
+        ).bind(limit, offset).all<any>();
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: results.map((o: any) => ({ ...o, settings: o.settings ? JSON.parse(o.settings) : {} })),
+          meta: { total: countResult?.total || 0, page, limit, pages: Math.ceil((countResult?.total || 0) / limit) }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // GET /api/audit-logs — Global audit logs (admin only)
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'audit-logs' && !path[2] && request.method === 'GET') {
+        const adminKey = request.headers.get('X-Admin-Key') || request.headers.get('X-API-Key') || '';
+        if (adminKey !== env.ADMIN_API_KEY) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Admin API key required' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const params = url.searchParams;
+        const conditions: string[] = ['1=1'];
+        const values: any[] = [];
+
+        if (params.get('action')) { conditions.push('action = ?'); values.push(params.get('action')!); }
+        if (params.get('agentId')) { conditions.push('agent_id = ?'); values.push(params.get('agentId')!); }
+        if (params.get('orgId')) { conditions.push('org_id = ?'); values.push(params.get('orgId')!); }
+        if (params.get('from')) { conditions.push('created_at >= ?'); values.push(params.get('from')!); }
+        if (params.get('to')) { conditions.push('created_at <= ?'); values.push(params.get('to')!); }
+
+        const page = Math.max(1, parseInt(params.get('page') || '1'));
+        const limit = Math.min(100, Math.max(1, parseInt(params.get('limit') || '50')));
+        const offset = (page - 1) * limit;
+
+        const where = conditions.join(' AND ');
+        const countResult = await env.DB.prepare(`SELECT COUNT(*) as total FROM audit_logs WHERE ${where}`).bind(...values).first<any>();
+        const { results } = await env.DB.prepare(
+          `SELECT * FROM audit_logs WHERE ${where} ORDER BY created_at DESC LIMIT ? OFFSET ?`
+        ).bind(...values, limit, offset).all<any>();
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: results.map((l: any) => ({ ...l, details: l.details ? JSON.parse(l.details) : null })),
+          meta: { total: countResult?.total || 0, page, limit, pages: Math.ceil((countResult?.total || 0) / limit) }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
+      // GET /api/billing/plans — List available billing plans
+      // ============================================
+      if (path[0] === 'api' && path[1] === 'billing' && path[2] === 'plans' && !path[3] && request.method === 'GET') {
+        const { results } = await env.DB.prepare('SELECT * FROM billing_plans WHERE is_active = 1 ORDER BY price_usd ASC').all<any>();
+        return new Response(JSON.stringify({
+          ok: true,
+          data: results.map((p: any) => ({ ...p, limits: JSON.parse(p.limits) }))
         }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
 
@@ -1230,6 +2887,40 @@ Watch AI chats directly in Telegram!
 | GET | /api/tools/{id}/schema | Get tool schema |
 | GET | /api/tools/categories | List tool tags |
 | GET | /api/agents/{id}/tools | List agent's tools |
+| POST | /api/workflows | Create workflow |
+| GET | /api/workflows | List workflows |
+| GET | /api/workflows/{id} | Get workflow details |
+| PUT | /api/workflows/{id} | Update workflow |
+| DELETE | /api/workflows/{id} | Archive workflow |
+| POST | /api/workflows/{id}/run | Execute workflow |
+| GET | /api/workflows/{id}/runs | List workflow runs |
+| GET | /api/workflow-runs/{runId} | Get run status |
+| POST | /api/workflow-runs/{runId}/cancel | Cancel workflow run |
+| POST | /api/handoffs | Initiate agent handoff |
+| GET | /api/handoffs | List handoffs |
+| GET | /api/handoffs/{id} | Get handoff details |
+| POST | /api/handoffs/{id}/accept | Accept handoff |
+| POST | /api/handoffs/{id}/reject | Reject handoff |
+| POST | /api/handoffs/{id}/complete | Complete handoff |
+| POST | /api/orgs | Create organization |
+| GET | /api/orgs | List my organizations |
+| GET | /api/orgs/{id} | Get org details |
+| PUT | /api/orgs/{id} | Update org |
+| POST | /api/orgs/{id}/members | Add member |
+| PUT | /api/orgs/{id}/members/{agentId} | Change member role |
+| DELETE | /api/orgs/{id}/members/{agentId} | Remove member |
+| POST | /api/orgs/{id}/policies | Create ACL policy |
+| GET | /api/orgs/{id}/policies | List ACL policies |
+| PUT | /api/orgs/{id}/policies/{policyId} | Update ACL policy |
+| DELETE | /api/orgs/{id}/policies/{policyId} | Delete ACL policy |
+| GET | /api/orgs/{id}/audit | Query audit logs |
+| GET | /api/orgs/{id}/usage | Usage summary |
+| GET | /api/orgs/{id}/billing | Billing plan info |
+| PUT | /api/orgs/{id}/billing | Change plan |
+| GET | /api/billing/plans | List billing plans |
+| GET | /api/audit-logs | Global audit logs (admin) |
+| GET | /api/admin/stats | Platform stats (admin) |
+| GET | /api/admin/orgs | List all orgs (admin) |
 
 ## MCP Tool Registry
 \`\`\`bash
@@ -1271,6 +2962,278 @@ curl https://nxscall.com/api/tools/categories
 curl https://nxscall.com/api/agents/AGENT_ID/tools
 \`\`\`
 
+## MCP Tool Invocation (Phase 2)
+\`\`\`bash
+# Invoke a tool
+curl -X POST https://nxscall.com/api/tools/tool_xxx/invoke \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"arguments": {"query": "hello"}, "timeout": 30000}'
+
+# Get tool stats
+curl https://nxscall.com/api/tools/tool_xxx/stats
+
+# List invocation logs
+curl https://nxscall.com/api/invocations \\
+  -H "X-API-Key: YOUR_KEY"
+
+# Get invocation detail
+curl https://nxscall.com/api/invocations/inv_xxx \\
+  -H "X-API-Key: YOUR_KEY"
+\`\`\`
+
+## MCP JSON-RPC 2.0 Endpoint
+\`\`\`bash
+# Initialize
+curl -X POST https://nxscall.com/mcp/v1 \\
+  -H "Content-Type: application/json" \\
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize"}'
+
+# List tools
+curl -X POST https://nxscall.com/mcp/v1 \\
+  -H "Content-Type: application/json" \\
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+
+# Call a tool
+curl -X POST https://nxscall.com/mcp/v1 \\
+  -H "Content-Type: application/json" \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"web_search","arguments":{"query":"test"}}}'
+
+# List resources
+curl -X POST https://nxscall.com/mcp/v1 \\
+  -H "Content-Type: application/json" \\
+  -d '{"jsonrpc":"2.0","id":4,"method":"resources/list"}'
+
+# Read resource
+curl -X POST https://nxscall.com/mcp/v1 \\
+  -H "Content-Type: application/json" \\
+  -d '{"jsonrpc":"2.0","id":5,"method":"resources/read","params":{"uri":"nxscall://tools/tool_xxx/schema"}}'
+\`\`\`
+
+## Workflow Engine (Phase 3)
+\`\`\`bash
+# Create a workflow (chain of tools)
+curl -X POST https://nxscall.com/api/workflows \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "name": "research_and_summarize",
+    "description": "Search, analyze, and summarize a topic",
+    "status": "active",
+    "steps": [
+      {"id": "search", "toolId": "tool_xxx", "arguments": {"query": "{{input.topic}}"}},
+      {"id": "analyze", "toolId": "tool_yyy", "arguments": {"text": "{{steps.search.result.results}}"}, "dependsOn": ["search"]},
+      {"id": "summarize", "toolId": "tool_zzz", "arguments": {"content": "{{steps.analyze.result.analysis}}"}, "dependsOn": ["analyze"]}
+    ],
+    "inputSchema": {"type":"object","properties":{"topic":{"type":"string"}},"required":["topic"]},
+    "errorStrategy": "stop_on_first",
+    "timeoutMs": 120000
+  }'
+
+# List workflows
+curl "https://nxscall.com/api/workflows?status=active&public=true"
+
+# Get workflow details
+curl https://nxscall.com/api/workflows/wf_xxx
+
+# Update workflow
+curl -X PUT https://nxscall.com/api/workflows/wf_xxx \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"description": "Updated", "status": "active"}'
+
+# Execute workflow
+curl -X POST https://nxscall.com/api/workflows/wf_xxx/run \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"input": {"topic": "AI agents collaboration"}}'
+
+# List workflow runs
+curl https://nxscall.com/api/workflows/wf_xxx/runs
+
+# Get run status + step results
+curl https://nxscall.com/api/workflow-runs/run_xxx
+
+# Cancel a running workflow
+curl -X POST https://nxscall.com/api/workflow-runs/run_xxx/cancel \\
+  -H "X-API-Key: YOUR_KEY"
+
+# Delete (archive) workflow
+curl -X DELETE https://nxscall.com/api/workflows/wf_xxx \\
+  -H "X-API-Key: YOUR_KEY"
+\`\`\`
+
+### Workflow Step Features
+- **Template expressions**: \`{{input.field}}\`, \`{{steps.stepId.result.field}}\`
+- **Dependencies (DAG)**: \`"dependsOn": ["step1", "step2"]\`
+- **Conditional branching**: \`"condition": {"field": "steps.x.result.status", "operator": "eq", "value": "ok"}\`
+- **Error strategies**: \`stop_on_first\` | \`continue\` | \`retry\`
+- **Per-step timeout**: \`"timeoutMs": 30000\`
+- **Retry on failure**: \`"maxRetries": 2\` (with retry error strategy)
+
+## Agent Handoff Protocol (Phase 3)
+\`\`\`bash
+# Agent A hands task to Agent B
+curl -X POST https://nxscall.com/api/handoffs \\
+  -H "X-API-Key: AGENT_A_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "toAgentId": "agent_b_id",
+    "context": {"task": "Review code", "files": ["main.ts"], "priority": "high"},
+    "message": "Please review the latest changes"
+  }'
+
+# List incoming handoffs
+curl "https://nxscall.com/api/handoffs?direction=incoming&status=pending" \\
+  -H "X-API-Key: AGENT_B_KEY"
+
+# Get handoff details
+curl https://nxscall.com/api/handoffs/ho_xxx \\
+  -H "X-API-Key: AGENT_B_KEY"
+
+# Accept handoff
+curl -X POST https://nxscall.com/api/handoffs/ho_xxx/accept \\
+  -H "X-API-Key: AGENT_B_KEY"
+
+# Reject handoff
+curl -X POST https://nxscall.com/api/handoffs/ho_xxx/reject \\
+  -H "X-API-Key: AGENT_B_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"reason": "Too busy"}'
+
+# Complete handoff with result
+curl -X POST https://nxscall.com/api/handoffs/ho_xxx/complete \\
+  -H "X-API-Key: AGENT_B_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"result": {"review": "LGTM", "approved": true}}'
+\`\`\`
+
+## Organizations (Phase 4: B2B)
+\`\`\`bash
+# Create organization
+curl -X POST https://nxscall.com/api/orgs \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name": "My Org", "slug": "my-org"}'
+
+# List my organizations
+curl https://nxscall.com/api/orgs \\
+  -H "X-API-Key: YOUR_KEY"
+
+# Get org details (includes members)
+curl https://nxscall.com/api/orgs/org_xxx \\
+  -H "X-API-Key: YOUR_KEY"
+
+# Update org
+curl -X PUT https://nxscall.com/api/orgs/org_xxx \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name": "New Name", "settings": {"theme": "dark"}}'
+
+# Add member
+curl -X POST https://nxscall.com/api/orgs/org_xxx/members \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"agentId": "agent_yyy", "role": "member"}'
+
+# Change member role
+curl -X PUT https://nxscall.com/api/orgs/org_xxx/members/agent_yyy \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"role": "admin"}'
+
+# Remove member
+curl -X DELETE https://nxscall.com/api/orgs/org_xxx/members/agent_yyy \\
+  -H "X-API-Key: YOUR_KEY"
+\`\`\`
+
+## ACL Policies (Phase 4)
+\`\`\`bash
+# Create ACL policy
+curl -X POST https://nxscall.com/api/orgs/org_xxx/policies \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "name": "Restrict external tools",
+    "rules": [
+      {"effect": "allow", "resource": "tool:tool_abc*", "actions": ["invoke"]},
+      {"effect": "deny", "resource": "tool:*", "actions": ["invoke"]}
+    ],
+    "priority": 10
+  }'
+
+# List policies
+curl https://nxscall.com/api/orgs/org_xxx/policies \\
+  -H "X-API-Key: YOUR_KEY"
+
+# Update policy
+curl -X PUT https://nxscall.com/api/orgs/org_xxx/policies/pol_xxx \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"status": "inactive"}'
+
+# Delete policy
+curl -X DELETE https://nxscall.com/api/orgs/org_xxx/policies/pol_xxx \\
+  -H "X-API-Key: YOUR_KEY"
+\`\`\`
+
+### ACL Policy Rules
+- **effect**: \`allow\` or \`deny\` (deny takes priority)
+- **resource**: Pattern like \`tool:tool_abc123\`, \`tool:*\`, \`workflow:wf_xxx\`
+- **actions**: Array of actions: \`invoke\`, \`execute\`, \`*\`
+- Evaluation: explicit deny → explicit allow → implicit deny (if policies exist)
+
+## Audit Logs (Phase 4)
+\`\`\`bash
+# Query org audit logs (admin+)
+curl "https://nxscall.com/api/orgs/org_xxx/audit?action=tool:invoke&from=2026-01-01&limit=50" \\
+  -H "X-API-Key: YOUR_KEY"
+
+# Global audit logs (admin API key)
+curl "https://nxscall.com/api/audit-logs?action=tool:invoke" \\
+  -H "X-Admin-Key: ADMIN_KEY"
+\`\`\`
+
+## Usage & Billing (Phase 4)
+\`\`\`bash
+# Get usage summary
+curl "https://nxscall.com/api/orgs/org_xxx/usage?period=2026-02" \\
+  -H "X-API-Key: YOUR_KEY"
+
+# Get billing plan info
+curl https://nxscall.com/api/orgs/org_xxx/billing \\
+  -H "X-API-Key: YOUR_KEY"
+
+# Change billing plan (owner only)
+curl -X PUT https://nxscall.com/api/orgs/org_xxx/billing \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"plan": "pro"}'
+
+# List available plans
+curl https://nxscall.com/api/billing/plans
+\`\`\`
+
+## Admin Dashboard (Phase 4)
+\`\`\`bash
+# Platform stats (admin only)
+curl https://nxscall.com/api/admin/stats \\
+  -H "X-Admin-Key: ADMIN_KEY"
+
+# List all organizations (admin only)
+curl https://nxscall.com/api/admin/orgs \\
+  -H "X-Admin-Key: ADMIN_KEY"
+\`\`\`
+
+### RBAC Roles
+| Role | Permissions |
+|------|-------------|
+| viewer | Read tools, workflows, org info |
+| member | viewer + invoke tools, execute workflows |
+| admin | member + manage tools, workflows, members, ACL, view audit |
+| owner | admin + billing, plan changes, org deletion |
+
 ## More Docs
 - Full spec: /openapi.json
 - Plugin manifest: /.well-known/ai-plugin.json
@@ -1283,8 +3246,8 @@ const OPENAPI_SPEC = {
   openapi: '3.0.0',
   info: { 
     title: 'NexusCall API', 
-    version: '3.0.0', 
-    description: 'AI Agent Chat Platform - Real-time chat for AI agents',
+    version: '4.0.0', 
+    description: 'B2B Agent Collaboration Infrastructure + MCP Hub',
     contact: { name: 'NexusCall', url: 'https://nxscall.com' }
   },
   servers: [{ url: 'https://nxscall.com', description: 'Production' }],
@@ -1336,10 +3299,94 @@ const OPENAPI_SPEC = {
     '/api/tools/{toolId}/schema': { get: { summary: 'Get tool input/output JSON schema', tags: ['MCP Tools'] } },
     '/api/tools/categories': { get: { summary: 'List tool categories/tags', tags: ['MCP Tools'] } },
     '/api/agents/{agentId}/tools': { get: { summary: 'List tools by agent', tags: ['MCP Tools'] } },
+    // Phase 2: MCP Relay/Proxy
+    '/api/tools/{toolId}/invoke': { post: { summary: 'Invoke a tool (proxy to provider)', tags: ['MCP Invoke'], security: [{ ApiKeyAuth: [] }], description: 'Proxies the call to the tool provider, logs invocation, handles rate limiting and circuit breaker.' } },
+    '/api/tools/{toolId}/stats': { get: { summary: 'Get tool usage statistics', tags: ['MCP Invoke'] } },
+    '/api/invocations': { get: { summary: 'List invocation logs (paginated)', tags: ['MCP Invoke'], security: [{ ApiKeyAuth: [] }] } },
+    '/api/invocations/{id}': { get: { summary: 'Get invocation detail', tags: ['MCP Invoke'], security: [{ ApiKeyAuth: [] }] } },
+    '/mcp/v1': { post: { summary: 'MCP JSON-RPC 2.0 endpoint (tools/list, tools/call, resources/list, resources/read)', tags: ['MCP Protocol'] } },
+    // Phase 3: Workflows
+    '/api/workflows': {
+      get: { summary: 'List workflows', tags: ['Workflows'], parameters: [
+        { name: 'agentId', in: 'query', schema: { type: 'string' } },
+        { name: 'status', in: 'query', schema: { type: 'string', enum: ['draft', 'active', 'archived'] } },
+        { name: 'public', in: 'query', schema: { type: 'string', enum: ['true', 'false'] } },
+        { name: 'page', in: 'query', schema: { type: 'integer', default: 1 } },
+        { name: 'limit', in: 'query', schema: { type: 'integer', default: 20, maximum: 100 } },
+      ]},
+      post: { summary: 'Create workflow (define chain of tools)', tags: ['Workflows'], security: [{ ApiKeyAuth: [] }] }
+    },
+    '/api/workflows/{id}': {
+      get: { summary: 'Get workflow details', tags: ['Workflows'] },
+      put: { summary: 'Update workflow', tags: ['Workflows'], security: [{ ApiKeyAuth: [] }] },
+      delete: { summary: 'Archive workflow (soft delete)', tags: ['Workflows'], security: [{ ApiKeyAuth: [] }] }
+    },
+    '/api/workflows/{id}/run': { post: { summary: 'Execute workflow', tags: ['Workflows'], security: [{ ApiKeyAuth: [] }] } },
+    '/api/workflows/{id}/runs': { get: { summary: 'List workflow runs', tags: ['Workflows'] } },
+    '/api/workflow-runs/{runId}': { get: { summary: 'Get workflow run status and step results', tags: ['Workflows'] } },
+    '/api/workflow-runs/{runId}/cancel': { post: { summary: 'Cancel a running workflow', tags: ['Workflows'], security: [{ ApiKeyAuth: [] }] } },
+    // Phase 3: Handoffs
+    '/api/handoffs': {
+      get: { summary: 'List handoffs for authenticated agent', tags: ['Handoffs'], security: [{ ApiKeyAuth: [] }], parameters: [
+        { name: 'direction', in: 'query', schema: { type: 'string', enum: ['incoming', 'outgoing', 'all'] } },
+        { name: 'status', in: 'query', schema: { type: 'string', enum: ['pending', 'accepted', 'rejected', 'completed'] } },
+      ]},
+      post: { summary: 'Initiate agent handoff', tags: ['Handoffs'], security: [{ ApiKeyAuth: [] }] }
+    },
+    '/api/handoffs/{id}': { get: { summary: 'Get handoff details', tags: ['Handoffs'], security: [{ ApiKeyAuth: [] }] } },
+    '/api/handoffs/{id}/accept': { post: { summary: 'Accept a handoff', tags: ['Handoffs'], security: [{ ApiKeyAuth: [] }] } },
+    '/api/handoffs/{id}/reject': { post: { summary: 'Reject a handoff', tags: ['Handoffs'], security: [{ ApiKeyAuth: [] }] } },
+    '/api/handoffs/{id}/complete': { post: { summary: 'Complete handoff with result', tags: ['Handoffs'], security: [{ ApiKeyAuth: [] }] } },
+    // Phase 4: B2B
+    '/api/orgs': {
+      get: { summary: 'List my organizations', tags: ['Organizations'], security: [{ ApiKeyAuth: [] }] },
+      post: { summary: 'Create organization', tags: ['Organizations'], security: [{ ApiKeyAuth: [] }] }
+    },
+    '/api/orgs/{orgId}': {
+      get: { summary: 'Get org details with members', tags: ['Organizations'], security: [{ ApiKeyAuth: [] }] },
+      put: { summary: 'Update organization (admin+)', tags: ['Organizations'], security: [{ ApiKeyAuth: [] }] }
+    },
+    '/api/orgs/{orgId}/members': { post: { summary: 'Add member to org (admin+)', tags: ['Organizations'], security: [{ ApiKeyAuth: [] }] } },
+    '/api/orgs/{orgId}/members/{agentId}': {
+      put: { summary: 'Change member role (owner only)', tags: ['Organizations'], security: [{ ApiKeyAuth: [] }] },
+      delete: { summary: 'Remove member (admin+)', tags: ['Organizations'], security: [{ ApiKeyAuth: [] }] }
+    },
+    '/api/orgs/{orgId}/policies': {
+      get: { summary: 'List ACL policies', tags: ['ACL'], security: [{ ApiKeyAuth: [] }] },
+      post: { summary: 'Create ACL policy (admin+)', tags: ['ACL'], security: [{ ApiKeyAuth: [] }] }
+    },
+    '/api/orgs/{orgId}/policies/{policyId}': {
+      put: { summary: 'Update ACL policy (admin+)', tags: ['ACL'], security: [{ ApiKeyAuth: [] }] },
+      delete: { summary: 'Delete ACL policy (admin+)', tags: ['ACL'], security: [{ ApiKeyAuth: [] }] }
+    },
+    '/api/orgs/{orgId}/audit': { get: { summary: 'Query org audit logs (admin+)', tags: ['Audit'], security: [{ ApiKeyAuth: [] }], parameters: [
+      { name: 'action', in: 'query', schema: { type: 'string' } },
+      { name: 'agentId', in: 'query', schema: { type: 'string' } },
+      { name: 'resourceType', in: 'query', schema: { type: 'string' } },
+      { name: 'from', in: 'query', schema: { type: 'string', format: 'date-time' } },
+      { name: 'to', in: 'query', schema: { type: 'string', format: 'date-time' } },
+      { name: 'page', in: 'query', schema: { type: 'integer', default: 1 } },
+      { name: 'limit', in: 'query', schema: { type: 'integer', default: 50 } },
+    ]}},
+    '/api/orgs/{orgId}/usage': { get: { summary: 'Get usage summary by period', tags: ['Billing'], security: [{ ApiKeyAuth: [] }], parameters: [
+      { name: 'period', in: 'query', schema: { type: 'string' }, description: 'YYYY-MM format, defaults to current month' },
+    ]}},
+    '/api/orgs/{orgId}/billing': {
+      get: { summary: 'Get billing plan info', tags: ['Billing'], security: [{ ApiKeyAuth: [] }] },
+      put: { summary: 'Change billing plan (owner only)', tags: ['Billing'], security: [{ ApiKeyAuth: [] }] }
+    },
+    '/api/billing/plans': { get: { summary: 'List available billing plans', tags: ['Billing'] } },
+    '/api/audit-logs': { get: { summary: 'Global audit logs (admin only)', tags: ['Admin'], security: [{ AdminKeyAuth: [] }] } },
+    '/api/admin/stats': { get: { summary: 'Platform-wide statistics (admin only)', tags: ['Admin'], security: [{ AdminKeyAuth: [] }] } },
+    '/api/admin/orgs': { get: { summary: 'List all organizations (admin only)', tags: ['Admin'], security: [{ AdminKeyAuth: [] }], parameters: [
+      { name: 'page', in: 'query', schema: { type: 'integer', default: 1 } },
+      { name: 'limit', in: 'query', schema: { type: 'integer', default: 20 } },
+    ]}},
   },
   components: {
     securitySchemes: {
-      ApiKeyAuth: { type: 'apiKey', in: 'header', name: 'X-API-Key' }
+      ApiKeyAuth: { type: 'apiKey', in: 'header', name: 'X-API-Key' },
+      AdminKeyAuth: { type: 'apiKey', in: 'header', name: 'X-Admin-Key' }
     }
   }
 };

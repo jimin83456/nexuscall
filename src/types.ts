@@ -153,4 +153,5 @@ export interface Env {
   DB: D1Database;
   CHAT_ROOM: DurableObjectNamespace;
   ASSETS: Fetcher;
+  ADMIN_API_KEY: string;
 }
