@@ -17,6 +17,10 @@ export interface Room {
   created_at: string;
   created_by: string;
   is_active: number;
+  is_dm: number;
+  password: string | null;
+  failed_attempts: number;
+  locked_at: string | null;
 }
 
 export interface Message {
@@ -25,6 +29,7 @@ export interface Message {
   agent_id: string;
   content: string;
   created_at: string;
+  is_dm: number;
   agent?: Agent;
 }
 
@@ -35,14 +40,14 @@ export interface RoomMember {
 }
 
 // ============================================
-// PHASE 1: RAG Memory System
+// RAG Memory System
 // ============================================
 export interface Memory {
   id: string;
   content: string;
-  tags: string[]; // JSON array of tags
+  tags: string[];
   source: string | null;
-  embedding: string | null; // For vector search
+  embedding: string | null;
   agent_id: string | null;
   created_at: string;
   updated_at: string;
@@ -53,12 +58,12 @@ export interface MemorySearchResult {
   content: string;
   tags: string[];
   source: string | null;
-  score: number; // Similarity score
+  score: number;
   created_at: string;
 }
 
 // ============================================
-// PHASE 2: Skills Marketplace
+// Skills Marketplace
 // ============================================
 export interface Skill {
   id: string;
@@ -75,14 +80,8 @@ export interface Skill {
   updated_at: string;
 }
 
-export interface SkillMatch {
-  skill: Skill;
-  agent: Agent;
-  match_score: number;
-}
-
 // ============================================
-// PHASE 3: Collaboration Workspace
+// Collaboration Workspace
 // ============================================
 export interface Project {
   id: string;
@@ -102,64 +101,15 @@ export interface Task {
   description: string | null;
   assigned_to: string | null;
   status: 'pending' | 'in_progress' | 'completed' | 'blocked';
-  priority: 0 | 1 | 2 | 3; // 0=low, 1=medium, 2=high, 3=urgent
+  priority: 0 | 1 | 2 | 3;
   due_date: string | null;
   created_by: string | null;
   created_at: string;
   updated_at: string;
 }
 
-export interface TaskWithAssignee extends Task {
-  assignee?: Agent;
-}
-
 // ============================================
-// PHASE 4: Economy System
-// ============================================
-export interface TokenBalance {
-  agent_id: string;
-  balance: number;
-  total_earned: number;
-  total_spent: number;
-  updated_at: string;
-}
-
-export interface TokenTransaction {
-  id: string;
-  agent_id: string;
-  amount: number; // Positive=earn, Negative=spend
-  type: 'message' | 'collaboration' | 'task_complete' | 'skill_use' | 'referral';
-  description: string | null;
-  related_id: string | null;
-  created_at: string;
-}
-
-// ============================================
-// PHASE 5: Telegram Bridge
-// ============================================
-export interface TelegramChannel {
-  id: string;
-  chat_id: string;
-  name: string;
-  type: 'channel' | 'group' | 'private';
-  linked_room_id: string | null;
-  is_active: number;
-  created_by: string | null;
-  created_at: string;
-  updated_at: string;
-}
-
-export interface TelegramSubscriber {
-  id: string;
-  telegram_user_id: string;
-  telegram_username: string | null;
-  agent_id: string | null;
-  is_admin: number;
-  created_at: string;
-}
-
-// ============================================
-// PHASE 5.1: Security - API Key & Rate Limiting
+// Security - API Key & Rate Limiting
 // ============================================
 export interface Developer {
   id: string;
@@ -185,36 +135,6 @@ export interface ApiKey {
   created_at: string;
 }
 
-export interface RateLimit {
-  id: string;
-  api_key: string;
-  request_count: number;
-  window_start: string;
-  created_at: string;
-}
-
-// ============================================
-// PHASE 5.2: Observability - API Usage Logs
-// ============================================
-export interface ApiUsageLog {
-  id: string;
-  developer_id: string;
-  api_key: string;
-  endpoint: string;
-  method: string;
-  status_code: number;
-  response_time_ms: number;
-  tokens_used: number;
-  error_message: string | null;
-  created_at: string;
-}
-
-export interface ApiUsageStats {
-  total_requests: number;
-  avg_response_time_ms: number;
-  error_count: number;
-}
-
 // ============================================
 // WebSocket Types
 // ============================================
@@ -233,5 +153,4 @@ export interface Env {
   DB: D1Database;
   CHAT_ROOM: DurableObjectNamespace;
   ASSETS: Fetcher;
-  TELEGRAM_BOT_TOKEN?: string;
 }
