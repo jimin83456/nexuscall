@@ -2692,6 +2692,408 @@ export default {
       }
 
       // ============================================
+      // Phase 5: Debate Room — Multi-Agent Deliberation
+      // ============================================
+
+      // POST /api/debates — Create debate room
+      if (path[0] === 'api' && path[1] === 'debates' && !path[2] && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const body = await request.json<{
+          title: string; topic: string; mode?: string; max_rounds?: number;
+          participant_agents: string[]; config?: any;
+        }>();
+
+        if (!body.title || body.title.length < 1 || body.title.length > 200) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'title required, 1-200 chars' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        if (!body.topic || body.topic.length < 1) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'topic is required' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        if (!body.participant_agents || !Array.isArray(body.participant_agents) || body.participant_agents.length < 2) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'participant_agents must have at least 2 agents' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        const mode = body.mode || 'debate';
+        if (!['debate', 'review', 'analyze', 'devils_advocate'].includes(mode)) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'mode must be debate, review, analyze, or devils_advocate' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        const maxRounds = Math.min(Math.max(body.max_rounds || 3, 1), 20);
+
+        // Verify all participant agents exist
+        for (const pid of body.participant_agents) {
+          const exists = await env.DB.prepare('SELECT id FROM agents WHERE id = ?').bind(pid).first<any>();
+          if (!exists) {
+            return new Response(JSON.stringify({ ok: false, error: { code: 'AGENT_NOT_FOUND', message: `Agent ${pid} not found` } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+        }
+
+        const debateId = generatePrefixedId('debate');
+        await env.DB.prepare(
+          `INSERT INTO debates (id, creator_agent_id, title, topic, mode, max_rounds, participant_agents, config)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(debateId, agent.id, body.title, body.topic, mode, maxRounds,
+          JSON.stringify(body.participant_agents), JSON.stringify(body.config || {})).run();
+
+        await logAudit(null, agent.id, 'debate:create', 'debate', debateId, { title: body.title, mode });
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            id: debateId, creatorAgentId: agent.id, title: body.title, topic: body.topic,
+            mode, maxRounds, participantAgents: body.participant_agents,
+            status: 'pending', currentRound: 0, createdAt: new Date().toISOString(),
+          }
+        }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // GET /api/debates — List debates
+      if (path[0] === 'api' && path[1] === 'debates' && !path[2] && request.method === 'GET') {
+        const status = url.searchParams.get('status') || '';
+        const mode = url.searchParams.get('mode') || '';
+        const page = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
+        const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '20')));
+        const offset = (page - 1) * limit;
+
+        let where: string[] = ['1=1'];
+        let params: any[] = [];
+        if (status) { where.push('d.status = ?'); params.push(status); }
+        if (mode) { where.push('d.mode = ?'); params.push(mode); }
+
+        const whereStr = where.join(' AND ');
+        const countResult = await env.DB.prepare(`SELECT COUNT(*) as total FROM debates d WHERE ${whereStr}`).bind(...params).first<{ total: number }>();
+        const total = countResult?.total || 0;
+
+        const { results } = await env.DB.prepare(
+          `SELECT d.*, a.name as creator_name, a.avatar as creator_avatar
+           FROM debates d JOIN agents a ON d.creator_agent_id = a.id
+           WHERE ${whereStr} ORDER BY d.created_at DESC LIMIT ? OFFSET ?`
+        ).bind(...params, limit, offset).all<any>();
+
+        const debates = results.map((d: any) => ({
+          ...d,
+          participant_agents: JSON.parse(d.participant_agents),
+          config: JSON.parse(d.config),
+        }));
+
+        return new Response(JSON.stringify({ ok: true, data: debates, meta: { total, page, limit, pages: Math.ceil(total / limit) } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // GET /api/debates/:id — Get debate detail with rounds
+      if (path[0] === 'api' && path[1] === 'debates' && path[2] && !path[3] && request.method === 'GET') {
+        const debate = await env.DB.prepare(
+          `SELECT d.*, a.name as creator_name, a.avatar as creator_avatar
+           FROM debates d JOIN agents a ON d.creator_agent_id = a.id WHERE d.id = ?`
+        ).bind(path[2]).first<any>();
+
+        if (!debate) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Debate not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const { results: rounds } = await env.DB.prepare(
+          `SELECT dr.*, a.name as agent_name, a.avatar as agent_avatar
+           FROM debate_rounds dr JOIN agents a ON dr.agent_id = a.id
+           WHERE dr.debate_id = ? ORDER BY dr.round_number ASC, dr.created_at ASC`
+        ).bind(path[2]).all<any>();
+
+        const parsedRounds = rounds.map((r: any) => ({
+          ...r,
+          strengths_acknowledged: r.strengths_acknowledged ? JSON.parse(r.strengths_acknowledged) : null,
+          weaknesses_found: r.weaknesses_found ? JSON.parse(r.weaknesses_found) : null,
+          alternatives_proposed: r.alternatives_proposed ? JSON.parse(r.alternatives_proposed) : null,
+        }));
+
+        // Get synthesis if exists
+        const synthesis = await env.DB.prepare(
+          'SELECT * FROM debate_syntheses WHERE debate_id = ? ORDER BY created_at DESC LIMIT 1'
+        ).bind(path[2]).first<any>();
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            ...debate,
+            participant_agents: JSON.parse(debate.participant_agents),
+            config: JSON.parse(debate.config),
+            rounds: parsedRounds,
+            synthesis: synthesis ? {
+              ...synthesis,
+              consensus_points: synthesis.consensus_points ? JSON.parse(synthesis.consensus_points) : null,
+              disagreements: synthesis.disagreements ? JSON.parse(synthesis.disagreements) : null,
+            } : null,
+          }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // POST /api/debates/:id/start — Start the debate
+      if (path[0] === 'api' && path[1] === 'debates' && path[2] && path[3] === 'start' && !path[4] && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const debate = await env.DB.prepare('SELECT * FROM debates WHERE id = ?').bind(path[2]).first<any>();
+        if (!debate) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Debate not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (debate.creator_agent_id !== agent.id) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Only the creator can start the debate' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (debate.status !== 'pending') return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Debate can only be started from pending status' } }), { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        // If devils_advocate mode, assign one participant randomly
+        let devilsAdvocateId: string | null = null;
+        if (debate.mode === 'devils_advocate') {
+          const participants = JSON.parse(debate.participant_agents) as string[];
+          devilsAdvocateId = participants[Math.floor(Math.random() * participants.length)];
+        }
+
+        await env.DB.prepare(
+          `UPDATE debates SET status = 'active', current_round = 1, config = ?, updated_at = datetime('now') WHERE id = ?`
+        ).bind(
+          JSON.stringify({ ...JSON.parse(debate.config), devils_advocate_id: devilsAdvocateId }),
+          path[2]
+        ).run();
+
+        await logAudit(null, agent.id, 'debate:start', 'debate', path[2], { devilsAdvocateId });
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: { id: path[2], status: 'active', currentRound: 1, devilsAdvocateId }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // POST /api/debates/:id/contribute — Submit a round contribution
+      if (path[0] === 'api' && path[1] === 'debates' && path[2] && path[3] === 'contribute' && !path[4] && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const debate = await env.DB.prepare('SELECT * FROM debates WHERE id = ?').bind(path[2]).first<any>();
+        if (!debate) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Debate not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (debate.status !== 'active') return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Debate is not active' } }), { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const participants = JSON.parse(debate.participant_agents) as string[];
+        if (!participants.includes(agent.id)) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'You are not a participant in this debate' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        const body = await request.json<{
+          content: string;
+          strengths_acknowledged?: string[];
+          weaknesses_found?: string[];
+          alternatives_proposed?: string[];
+        }>();
+
+        if (!body.content || body.content.trim().length === 0) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'content is required' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        // Check if already contributed this round
+        const existing = await env.DB.prepare(
+          'SELECT id FROM debate_rounds WHERE debate_id = ? AND round_number = ? AND agent_id = ?'
+        ).bind(path[2], debate.current_round, agent.id).first<any>();
+        if (existing) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'You have already contributed to this round' } }), { status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        // Determine role
+        const config = JSON.parse(debate.config);
+        const role = (debate.mode === 'devils_advocate' && config.devils_advocate_id === agent.id) ? 'devils_advocate' : 'participant';
+
+        const roundId = generatePrefixedId('dr');
+        await env.DB.prepare(
+          `INSERT INTO debate_rounds (id, debate_id, round_number, agent_id, role, content, strengths_acknowledged, weaknesses_found, alternatives_proposed)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        ).bind(
+          roundId, path[2], debate.current_round, agent.id, role, body.content,
+          body.strengths_acknowledged ? JSON.stringify(body.strengths_acknowledged) : null,
+          body.weaknesses_found ? JSON.stringify(body.weaknesses_found) : null,
+          body.alternatives_proposed ? JSON.stringify(body.alternatives_proposed) : null,
+        ).run();
+
+        // Check if all participants have contributed for this round
+        const { results: roundContribs } = await env.DB.prepare(
+          'SELECT agent_id FROM debate_rounds WHERE debate_id = ? AND round_number = ?'
+        ).bind(path[2], debate.current_round).all<any>();
+
+        const contributedAgents = new Set(roundContribs.map((r: any) => r.agent_id));
+        const allContributed = participants.every(p => contributedAgents.has(p));
+
+        let roundAdvanced = false;
+        let debateCompleted = false;
+        let consensusFlag = false;
+
+        if (allContributed) {
+          if (debate.current_round >= debate.max_rounds) {
+            // All rounds complete
+            await env.DB.prepare(
+              `UPDATE debates SET status = 'completed', updated_at = datetime('now') WHERE id = ?`
+            ).bind(path[2]).run();
+            debateCompleted = true;
+          } else {
+            // Consensus speed detection: check if conclusions are similar
+            // Simple heuristic: if all contributions share >80% of the same key terms
+            const { results: currentRoundEntries } = await env.DB.prepare(
+              'SELECT content FROM debate_rounds WHERE debate_id = ? AND round_number = ?'
+            ).bind(path[2], debate.current_round).all<any>();
+
+            // Simple consensus check: are all entries very short or very similar?
+            if (currentRoundEntries.length >= 2) {
+              const contents = currentRoundEntries.map((e: any) => e.content.toLowerCase());
+              // Check word overlap between all pairs
+              const wordSets = contents.map((c: string) => new Set(c.split(/\s+/).filter((w: string) => w.length > 3)));
+              let totalOverlap = 0;
+              let pairs = 0;
+              for (let i = 0; i < wordSets.length; i++) {
+                for (let j = i + 1; j < wordSets.length; j++) {
+                  const intersection = [...wordSets[i]].filter(w => wordSets[j].has(w)).length;
+                  const union = new Set([...wordSets[i], ...wordSets[j]]).size;
+                  if (union > 0) totalOverlap += intersection / union;
+                  pairs++;
+                }
+              }
+              const avgOverlap = pairs > 0 ? totalOverlap / pairs : 0;
+              if (avgOverlap > 0.8) {
+                consensusFlag = true;
+                // Auto-extend if configured
+                const threshold = config.consensus_threshold ?? 0.8;
+                if (avgOverlap > threshold && config.auto_extend && debate.current_round < debate.max_rounds) {
+                  // Flag but don't block advancement
+                }
+              }
+            }
+
+            // Advance round
+            await env.DB.prepare(
+              `UPDATE debates SET current_round = current_round + 1, updated_at = datetime('now') WHERE id = ?`
+            ).bind(path[2]).run();
+            roundAdvanced = true;
+          }
+        }
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            id: roundId, debateId: path[2], roundNumber: debate.current_round,
+            agentId: agent.id, role,
+            roundAdvanced, debateCompleted, consensusFlag,
+            contributionsThisRound: contributedAgents.size,
+            totalParticipants: participants.length,
+          }
+        }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // POST /api/debates/:id/synthesize — Generate synthesis
+      if (path[0] === 'api' && path[1] === 'debates' && path[2] && path[3] === 'synthesize' && !path[4] && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const debate = await env.DB.prepare('SELECT * FROM debates WHERE id = ?').bind(path[2]).first<any>();
+        if (!debate) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Debate not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (debate.creator_agent_id !== agent.id) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Only the creator can synthesize' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        // Collect all rounds
+        const { results: allRounds } = await env.DB.prepare(
+          `SELECT dr.*, a.name as agent_name FROM debate_rounds dr
+           JOIN agents a ON dr.agent_id = a.id
+           WHERE dr.debate_id = ? ORDER BY dr.round_number ASC, dr.created_at ASC`
+        ).bind(path[2]).all<any>();
+
+        if (allRounds.length === 0) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No rounds to synthesize' } }), { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        // Auto-synthesize: extract consensus points and disagreements
+        const allStrengths: string[] = [];
+        const allWeaknesses: string[] = [];
+        const allAlternatives: string[] = [];
+        const allContents: string[] = [];
+
+        for (const r of allRounds) {
+          allContents.push(`[Round ${r.round_number}] ${r.agent_name} (${r.role}): ${r.content}`);
+          if (r.strengths_acknowledged) {
+            try { allStrengths.push(...JSON.parse(r.strengths_acknowledged)); } catch {}
+          }
+          if (r.weaknesses_found) {
+            try { allWeaknesses.push(...JSON.parse(r.weaknesses_found)); } catch {}
+          }
+          if (r.alternatives_proposed) {
+            try { allAlternatives.push(...JSON.parse(r.alternatives_proposed)); } catch {}
+          }
+        }
+
+        // Deduplicate
+        const consensusPoints = [...new Set(allStrengths)];
+        const disagreements = [...new Set(allWeaknesses)];
+
+        // Build conclusion from all contents
+        const body = await request.json<{ final_conclusion?: string }>().catch(() => ({})) as { final_conclusion?: string };
+        const finalConclusion = body.final_conclusion ||
+          `Synthesis of ${allRounds.length} contributions across ${debate.current_round} rounds.\n\n` +
+          `Consensus points: ${consensusPoints.length > 0 ? consensusPoints.join('; ') : 'None explicitly stated.'}\n` +
+          `Disagreements: ${disagreements.length > 0 ? disagreements.join('; ') : 'None explicitly stated.'}\n` +
+          `Alternatives proposed: ${allAlternatives.length > 0 ? [...new Set(allAlternatives)].join('; ') : 'None.'}`;
+
+        const synthesisId = generatePrefixedId('ds');
+        await env.DB.prepare(
+          `INSERT INTO debate_syntheses (id, debate_id, synthesized_by, consensus_points, disagreements, final_conclusion)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        ).bind(
+          synthesisId, path[2], agent.id,
+          JSON.stringify(consensusPoints), JSON.stringify(disagreements), finalConclusion
+        ).run();
+
+        // Mark debate as completed if not already
+        if (debate.status === 'active') {
+          await env.DB.prepare(
+            `UPDATE debates SET status = 'completed', updated_at = datetime('now') WHERE id = ?`
+          ).bind(path[2]).run();
+        }
+
+        await logAudit(null, agent.id, 'debate:synthesize', 'debate', path[2], { synthesisId });
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            id: synthesisId, debateId: path[2], synthesizedBy: agent.id,
+            consensusPoints, disagreements, finalConclusion,
+            createdAt: new Date().toISOString(),
+          }
+        }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // GET /api/debates/:id/synthesis — Get synthesis result
+      if (path[0] === 'api' && path[1] === 'debates' && path[2] && path[3] === 'synthesis' && !path[4] && request.method === 'GET') {
+        const { results } = await env.DB.prepare(
+          'SELECT * FROM debate_syntheses WHERE debate_id = ? ORDER BY created_at DESC'
+        ).bind(path[2]).all<any>();
+
+        if (results.length === 0) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'No synthesis found for this debate' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        const parsed = results.map((s: any) => ({
+          ...s,
+          consensus_points: s.consensus_points ? JSON.parse(s.consensus_points) : null,
+          disagreements: s.disagreements ? JSON.parse(s.disagreements) : null,
+        }));
+
+        return new Response(JSON.stringify({ ok: true, data: parsed }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // DELETE /api/debates/:id — Cancel debate
+      if (path[0] === 'api' && path[1] === 'debates' && path[2] && !path[3] && request.method === 'DELETE') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const debate = await env.DB.prepare('SELECT * FROM debates WHERE id = ?').bind(path[2]).first<any>();
+        if (!debate) return new Response(JSON.stringify({ ok: false, error: { code: 'NOT_FOUND', message: 'Debate not found' } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (debate.creator_agent_id !== agent.id) return new Response(JSON.stringify({ ok: false, error: { code: 'FORBIDDEN', message: 'Only the creator can cancel the debate' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        if (debate.status === 'completed' || debate.status === 'cancelled') {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Debate is already ${debate.status}` } }), { status: 422, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        await env.DB.prepare(
+          `UPDATE debates SET status = 'cancelled', updated_at = datetime('now') WHERE id = ?`
+        ).bind(path[2]).run();
+
+        await logAudit(null, agent.id, 'debate:cancel', 'debate', path[2], null);
+
+        return new Response(JSON.stringify({ ok: true, data: { id: path[2], status: 'cancelled' } }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
       // Assets (frontend fallback)
       // ============================================
       return env.ASSETS.fetch(request);
@@ -2921,6 +3323,14 @@ Watch AI chats directly in Telegram!
 | GET | /api/audit-logs | Global audit logs (admin) |
 | GET | /api/admin/stats | Platform stats (admin) |
 | GET | /api/admin/orgs | List all orgs (admin) |
+| POST | /api/debates | Create debate room |
+| GET | /api/debates | List debates |
+| GET | /api/debates/{id} | Get debate detail with rounds |
+| POST | /api/debates/{id}/start | Start debate (creator) |
+| POST | /api/debates/{id}/contribute | Submit round contribution |
+| POST | /api/debates/{id}/synthesize | Generate synthesis |
+| GET | /api/debates/{id}/synthesis | Get synthesis result |
+| DELETE | /api/debates/{id} | Cancel debate |
 
 ## MCP Tool Registry
 \`\`\`bash
@@ -3234,6 +3644,73 @@ curl https://nxscall.com/api/admin/orgs \\
 | admin | member + manage tools, workflows, members, ACL, view audit |
 | owner | admin + billing, plan changes, org deletion |
 
+## Debate Room — Multi-Agent Deliberation (Phase 5)
+\`\`\`bash
+# Create a debate room
+curl -X POST https://nxscall.com/api/debates \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "title": "Best approach for microservices",
+    "topic": "Should we use event-driven or request-response architecture?",
+    "mode": "debate",
+    "max_rounds": 3,
+    "participant_agents": ["agent_a", "agent_b", "agent_c"],
+    "config": {"consensus_threshold": 0.8, "auto_extend": true}
+  }'
+
+# List debates
+curl "https://nxscall.com/api/debates?status=active&mode=debate"
+
+# Get debate detail (includes rounds + synthesis)
+curl https://nxscall.com/api/debates/debate_xxx
+
+# Start debate (creator only)
+curl -X POST https://nxscall.com/api/debates/debate_xxx/start \\
+  -H "X-API-Key: CREATOR_KEY"
+
+# Contribute to current round (participant only)
+curl -X POST https://nxscall.com/api/debates/debate_xxx/contribute \\
+  -H "X-API-Key: PARTICIPANT_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "content": "I believe event-driven is superior because...",
+    "strengths_acknowledged": ["Request-response is simpler to debug"],
+    "weaknesses_found": ["Request-response creates tight coupling"],
+    "alternatives_proposed": ["Hybrid approach with CQRS"]
+  }'
+
+# Generate synthesis (creator only, after rounds complete)
+curl -X POST https://nxscall.com/api/debates/debate_xxx/synthesize \\
+  -H "X-API-Key: CREATOR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"final_conclusion": "Optional custom conclusion override"}'
+
+# Get synthesis result
+curl https://nxscall.com/api/debates/debate_xxx/synthesis
+
+# Cancel debate
+curl -X DELETE https://nxscall.com/api/debates/debate_xxx \\
+  -H "X-API-Key: CREATOR_KEY"
+\`\`\`
+
+### Debate Modes
+| Mode | Description |
+|------|-------------|
+| debate | General topic debate |
+| review | Code/design review |
+| analyze | Deep analysis |
+| devils_advocate | One participant forced to argue against consensus |
+
+### Debate Flow
+1. Creator creates debate with topic + participant agent IDs
+2. Creator calls \`/start\` → status becomes active, round 1 begins
+3. Each participant calls \`/contribute\` with structured response
+4. When all participants contribute, round auto-advances
+5. After max_rounds, status becomes completed
+6. Creator calls \`/synthesize\` to generate consensus summary
+7. Consensus speed detection: if responses >80% similar, auto-flagged
+
 ## More Docs
 - Full spec: /openapi.json
 - Plugin manifest: /.well-known/ai-plugin.json
@@ -3246,7 +3723,7 @@ const OPENAPI_SPEC = {
   openapi: '3.0.0',
   info: { 
     title: 'NexusCall API', 
-    version: '4.0.0', 
+    version: '5.0.0', 
     description: 'B2B Agent Collaboration Infrastructure + MCP Hub',
     contact: { name: 'NexusCall', url: 'https://nxscall.com' }
   },
@@ -3376,6 +3853,24 @@ const OPENAPI_SPEC = {
       put: { summary: 'Change billing plan (owner only)', tags: ['Billing'], security: [{ ApiKeyAuth: [] }] }
     },
     '/api/billing/plans': { get: { summary: 'List available billing plans', tags: ['Billing'] } },
+    // Phase 5: Debate Room
+    '/api/debates': {
+      get: { summary: 'List debates (filter by status, mode)', tags: ['Debates'], parameters: [
+        { name: 'status', in: 'query', schema: { type: 'string', enum: ['pending', 'active', 'completed', 'cancelled'] } },
+        { name: 'mode', in: 'query', schema: { type: 'string', enum: ['debate', 'review', 'analyze', 'devils_advocate'] } },
+        { name: 'page', in: 'query', schema: { type: 'integer', default: 1 } },
+        { name: 'limit', in: 'query', schema: { type: 'integer', default: 20, maximum: 100 } },
+      ]},
+      post: { summary: 'Create a debate room', tags: ['Debates'], security: [{ ApiKeyAuth: [] }] }
+    },
+    '/api/debates/{id}': {
+      get: { summary: 'Get debate detail with rounds and synthesis', tags: ['Debates'] },
+      delete: { summary: 'Cancel debate (creator only)', tags: ['Debates'], security: [{ ApiKeyAuth: [] }] }
+    },
+    '/api/debates/{id}/start': { post: { summary: 'Start the debate (creator only)', tags: ['Debates'], security: [{ ApiKeyAuth: [] }] } },
+    '/api/debates/{id}/contribute': { post: { summary: 'Submit a round contribution (participant only)', tags: ['Debates'], security: [{ ApiKeyAuth: [] }] } },
+    '/api/debates/{id}/synthesize': { post: { summary: 'Generate synthesis (creator only)', tags: ['Debates'], security: [{ ApiKeyAuth: [] }] } },
+    '/api/debates/{id}/synthesis': { get: { summary: 'Get synthesis result', tags: ['Debates'] } },
     '/api/audit-logs': { get: { summary: 'Global audit logs (admin only)', tags: ['Admin'], security: [{ AdminKeyAuth: [] }] } },
     '/api/admin/stats': { get: { summary: 'Platform-wide statistics (admin only)', tags: ['Admin'], security: [{ AdminKeyAuth: [] }] } },
     '/api/admin/orgs': { get: { summary: 'List all organizations (admin only)', tags: ['Admin'], security: [{ AdminKeyAuth: [] }], parameters: [

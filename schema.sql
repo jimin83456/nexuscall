@@ -421,6 +421,62 @@ CREATE TABLE IF NOT EXISTS billing_plans (
   created_at TEXT DEFAULT (datetime('now'))
 );
 
+-- ============================================
+-- Phase 5: Debate Room — Multi-Agent Deliberation
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS debates (
+  id TEXT PRIMARY KEY,                    -- debate_<nanoid>
+  creator_agent_id TEXT NOT NULL,         -- FK to agents table
+  title TEXT NOT NULL,
+  topic TEXT NOT NULL,
+  mode TEXT DEFAULT 'debate',             -- debate | review | analyze | devils_advocate
+  max_rounds INTEGER DEFAULT 3,
+  current_round INTEGER DEFAULT 0,
+  participant_agents TEXT NOT NULL,        -- JSON array of agent IDs
+  status TEXT DEFAULT 'pending',          -- pending | active | completed | cancelled
+  config TEXT DEFAULT '{}',               -- JSON: consensus_threshold, auto_extend, etc.
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (creator_agent_id) REFERENCES agents(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_debates_creator ON debates(creator_agent_id);
+CREATE INDEX IF NOT EXISTS idx_debates_status ON debates(status);
+CREATE INDEX IF NOT EXISTS idx_debates_mode ON debates(mode);
+
+CREATE TABLE IF NOT EXISTS debate_rounds (
+  id TEXT PRIMARY KEY,                    -- dr_<nanoid>
+  debate_id TEXT NOT NULL,                -- FK to debates
+  round_number INTEGER NOT NULL,
+  agent_id TEXT NOT NULL,                 -- FK to agents
+  role TEXT DEFAULT 'participant',        -- participant | devils_advocate
+  content TEXT NOT NULL,                  -- the agent's response for this round
+  strengths_acknowledged TEXT,            -- JSON array
+  weaknesses_found TEXT,                  -- JSON array
+  alternatives_proposed TEXT,             -- JSON array
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (debate_id) REFERENCES debates(id),
+  FOREIGN KEY (agent_id) REFERENCES agents(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_debate_rounds_debate ON debate_rounds(debate_id);
+CREATE INDEX IF NOT EXISTS idx_debate_rounds_agent ON debate_rounds(agent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_debate_rounds_unique ON debate_rounds(debate_id, round_number, agent_id);
+
+CREATE TABLE IF NOT EXISTS debate_syntheses (
+  id TEXT PRIMARY KEY,                    -- ds_<nanoid>
+  debate_id TEXT NOT NULL,                -- FK to debates
+  synthesized_by TEXT NOT NULL,           -- agent_id or 'system'
+  consensus_points TEXT,                  -- JSON array
+  disagreements TEXT,                     -- JSON array
+  final_conclusion TEXT NOT NULL,
+  created_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (debate_id) REFERENCES debates(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_debate_syntheses_debate ON debate_syntheses(debate_id);
+
 -- Seed default billing plans
 INSERT OR IGNORE INTO billing_plans (id, name, display_name, limits, price_usd) VALUES
   ('plan_free', 'free', 'Free', '{"tool_calls_per_month":1000,"workflow_runs_per_month":100,"members_max":5,"api_requests_per_month":10000}', 0),
