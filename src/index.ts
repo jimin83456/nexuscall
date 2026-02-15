@@ -507,9 +507,9 @@ export default {
         return new Response(JSON.stringify({ success: true }), { headers: corsHeaders });
       }
 
-      // Get Rooms (only if no room_id specified)
+      // Get Rooms (only if no room_id specified) - exclude DM rooms
       if (path[0] === 'api' && path[1] === 'rooms' && !path[2] && request.method === 'GET') {
-        const { results } = await env.DB.prepare('SELECT * FROM rooms WHERE is_active = 1 ORDER BY created_at DESC').all<Room>();
+        const { results } = await env.DB.prepare('SELECT * FROM rooms WHERE is_active = 1 AND (is_dm IS NULL OR is_dm = 0) ORDER BY created_at DESC').all<Room>();
         return new Response(JSON.stringify({ rooms: results }), {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' },
         });
@@ -635,9 +635,13 @@ export default {
         const dmId = 'dm_' + generateId().substring(0, 8);
         const dmName = `DM: ${body.participants.join(' ↔ ')}`;
         
+        // Generate 12-character random password
+        const password = Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
+        const password12 = password.substring(0, 12);
+        
         await env.DB.prepare(
-          'INSERT INTO rooms (id, name, type, created_by, is_dm) VALUES (?, ?, ?, ?, 1)'
-        ).bind(dmId, dmName, 'dm', body.participants[0]).run();
+          'INSERT INTO rooms (id, name, type, created_by, is_dm, password) VALUES (?, ?, ?, ?, 1, ?)'
+        ).bind(dmId, dmName, 'dm', body.participants[0], password12).run();
 
         // Add all participants to the DM room
         for (const participantId of body.participants) {
@@ -658,7 +662,8 @@ export default {
           type: 'dm',
           task: body.task || '',
           visibility: body.visibility || 'public',
-          observation_url: `nxscall.com/watch?session=${dmId}`,
+          password: password12, // Only shown once at creation!
+          observe_url: `nxscall.com/dm-watch?room=${dmId}`,
           ws_endpoint: `wss://${url.host}/ws/room/${dmId}`,
           message: 'DM room created. Participants can join via WebSocket.'
         }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
@@ -689,7 +694,92 @@ export default {
         return new Response(JSON.stringify({
           room: rooms[0],
           participants: members,
-          observation_url: `nxscall.com/watch?session=${dmId}`
+          observe_url: `nxscall.com/dm-watch?room=${dmId}`
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // Observe DM Room (with password verification)
+      if (path[0] === 'api' && path[1] === 'rooms' && path[2] === 'dm' && path[3] && path[4] === 'observe' && request.method === 'POST') {
+        const dmId = path[3];
+        const body = await request.json<{ password: string }>();
+        
+        // Get room
+        const { results: rooms } = await env.DB.prepare(
+          'SELECT * FROM rooms WHERE id = ? AND is_dm = 1'
+        ).bind(dmId).all<any>();
+
+        if (rooms.length === 0) {
+          return new Response(JSON.stringify({ error: 'DM room not found' }), { 
+            status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
+        }
+
+        const room = rooms[0];
+
+        // Check if locked
+        if (room.locked_at) {
+          const lockedTime = new Date(room.locked_at);
+          const now = new Date();
+          const hoursDiff = (now.getTime() - lockedTime.getTime()) / (1000 * 60 * 60);
+          if (hoursDiff < 24) {
+            return new Response(JSON.stringify({ error: 'Room is locked due to too many failed attempts. Try again later.' }), { 
+              status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+            });
+          } else {
+            // Reset after 24 hours
+            await env.DB.prepare('UPDATE rooms SET failed_attempts = 0, locked_at = NULL WHERE id = ?').bind(dmId).run();
+          }
+        }
+
+        // Verify password
+        if (room.password !== body.password) {
+          const newAttempts = (room.failed_attempts || 0) + 1;
+          await env.DB.prepare('UPDATE rooms SET failed_attempts = ? WHERE id = ?').bind(newAttempts, dmId).run();
+          
+          if (newAttempts >= 5) {
+            await env.DB.prepare('UPDATE rooms SET locked_at = datetime("now") WHERE id = ?').bind(dmId).run();
+            return new Response(JSON.stringify({ 
+              error: 'Too many failed attempts. Room is now locked for 24 hours.',
+              locked: true
+            }), { 
+              status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+            });
+          }
+          
+          return new Response(JSON.stringify({ 
+            error: 'Incorrect password',
+            attempts_remaining: 5 - newAttempts
+          }), { 
+            status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } 
+          });
+        }
+
+        // Password correct - reset failed attempts
+        await env.DB.prepare('UPDATE rooms SET failed_attempts = 0 WHERE id = ?').bind(dmId).run();
+
+        // Get participants
+        const { results: members } = await env.DB.prepare(`
+          SELECT a.id, a.name, a.avatar, a.is_online 
+          FROM room_members rm 
+          JOIN agents a ON rm.agent_id = a.id 
+          WHERE rm.room_id = ?
+        `).bind(dmId).all<Agent>();
+
+        // Get messages
+        const { results: messages } = await env.DB.prepare(`
+          SELECT m.*, a.name as agent_name, a.avatar as agent_avatar 
+          FROM messages m 
+          JOIN agents a ON m.agent_id = a.id 
+          WHERE m.room_id = ? AND m.is_dm = 1
+          ORDER BY m.created_at ASC
+        `).bind(dmId).all<any>();
+
+        return new Response(JSON.stringify({
+          room: { ...room, password: undefined },
+          participants: members,
+          messages: messages,
+          observe_url: `nxscall.com/dm-watch?room=${dmId}`,
+          ws_endpoint: `wss://${url.host}/ws/room/${dmId}?observe=true`
         }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
       }
 
