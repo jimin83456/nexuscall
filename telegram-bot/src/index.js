@@ -138,26 +138,35 @@ bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
   const firstName = msg.from.first_name || 'User';
   
-  const keyboard = [
-    [{ text: '🇰🇷 한국어', callback_data: 'lang_ko' }],
-    [{ text: '🇺🇸 English', callback_data: 'lang_en' }]
-  ];
+  // Reset user state
+  userStates.set(chatId, { language: 'ko' });
+  
+  const keyboard = {
+    keyboard: [
+      [{ text: '🇰🇷 한국어' }, { text: '🇺🇸 English' }]
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: true
+  };
   
   bot.sendMessage(chatId, 
     `👋 Hello ${firstName}! Welcome to NexusCall!\n\n` +
     t(chatId, 'selectLanguage'),
-    { reply_markup: { keyboard } }
+    { reply_markup: keyboard }
   );
 });
 
-// Callback query for language selection
-bot.on('callback_query', async (callbackQuery) => {
-  const msg = callbackQuery.message;
+// Handle language selection via reply keyboard
+bot.on('message', async (msg) => {
   const chatId = msg.chat.id;
-  const data = callbackQuery.data;
+  const text = msg.text;
   
-  if (data.startsWith('lang_')) {
-    const lang = data.split('_')[1];
+  // Skip commands
+  if (text && text.startsWith('/')) return;
+  
+  // Check for language selection via reply keyboard
+  if (text === '🇰🇷 한국어' || text === '🇺🇸 English') {
+    const lang = text === '🇰🇷 한국어' ? 'ko' : 'en';
     
     if (!userStates.has(chatId)) {
       userStates.set(chatId, { language: lang });
@@ -165,43 +174,18 @@ bot.on('callback_query', async (callbackQuery) => {
       userStates.get(chatId).language = lang;
     }
     
-    const selectedText = lang === 'ko' ? LANG.ko.langSelected : LANG.en.langSelected;
-    
-    bot.editMessageText(t(chatId, 'welcome') + '\n\n✅ ' + selectedText, {
-      chat_id: chatId,
-      message_id: msg.message_id
-    });
-    
-    setTimeout(() => {
-      bot.sendMessage(chatId, t(chatId, 'help'), {
+    bot.sendMessage(chatId, 
+      lang === 'ko' ? LANG.ko.langSelected : LANG.en.langSelected + '\n\n' + t(chatId, 'help'),
+      {
         reply_markup: {
           keyboard: [
             [{ text: '/rooms' }, { text: '/help' }]
-          ]
+          ],
+          resize_keyboard: true
         }
-      });
-    }, 500);
-  }
-  
-  if (data.startsWith('room_')) {
-    const roomId = data.split('_')[1];
-    const room = (await fetchRooms()).find(r => r.id === roomId);
-    
-    if (room) {
-      subscriptions.set(chatId, { roomId: room.id, roomName: room.name, isDm: false });
-      
-      bot.editMessageText(
-        t(chatId, 'subscribed') + '\n\n' + 
-        formatText(chatId, t(chatId, 'roomSubscribed'), {
-          name: room.name,
-          url: `https://nxscall.com/watch?room=${room.id}`
-        }), {
-          chat_id: chatId,
-          message_id: msg.message_id,
-          parse_mode: 'Markdown'
-        }
-      );
-    }
+      }
+    );
+    return;
   }
 });
 
@@ -211,7 +195,7 @@ bot.onText(/\/help/, (msg) => {
   bot.sendMessage(chatId, t(chatId, 'help'));
 });
 
-// Command: /rooms
+// Command: /rooms - Use reply keyboard instead of inline
 bot.onText(/\/rooms/, async (msg) => {
   const chatId = msg.chat.id;
   const rooms = await fetchRooms();
@@ -232,12 +216,43 @@ bot.onText(/\/rooms/, async (msg) => {
   text += '\n\n💡 /watch [room_id]';
   text += '\n🔐 /watchdm [dm_room_id] [password]';
   
+  // Build reply keyboard with room buttons
+  const keyboard = rooms.map((room, index) => [{
+    text: `${index + 1}. ${room.name || room.id}`
+  }]);
+  
   bot.sendMessage(chatId, text, { 
     parse_mode: 'Markdown',
-    reply_markup: {
-      inline_keyboard: buildRoomsKeyboard(rooms)
-    }
+    reply_markup: { keyboard, resize_keyboard: true }
   });
+});
+
+// Handle room selection via reply keyboard
+bot.on('message', async (msg) => {
+  const chatId = msg.chat.id;
+  const text = msg.text;
+  
+  // Skip if not a room selection
+  if (!text || !text.match(/^\d+\./)) return;
+  
+  const rooms = await fetchRooms();
+  const match = text.match(/^(\d+)\./);
+  if (!match) return;
+  
+  const index = parseInt(match[1]) - 1;
+  if (index < 0 || index >= rooms.length) return;
+  
+  const room = rooms[index];
+  subscriptions.set(chatId, { roomId: room.id, roomName: room.name, isDm: false });
+  
+  bot.sendMessage(chatId, 
+    t(chatId, 'subscribed') + '\n\n' +
+    formatText(chatId, t(chatId, 'roomSubscribed'), {
+      name: room.name,
+      url: `https://nxscall.com/watch?room=${room.id}`
+    }),
+    { parse_mode: 'Markdown' }
+  );
 });
 
 // Command: /watch
