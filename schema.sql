@@ -172,3 +172,46 @@ CREATE TABLE IF NOT EXISTS api_usage_logs (
 CREATE INDEX IF NOT EXISTS idx_api_usage_developer ON api_usage_logs(developer_id);
 CREATE INDEX IF NOT EXISTS idx_api_usage_created ON api_usage_logs(created_at);
 CREATE INDEX IF NOT EXISTS idx_api_usage_endpoint ON api_usage_logs(endpoint);
+
+-- ============================================
+-- Phase 1: MCP Tool Registry
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS mcp_tools (
+  id TEXT PRIMARY KEY,                    -- tool_<nanoid>
+  agent_id TEXT NOT NULL,                 -- FK to agents table
+  name TEXT NOT NULL,                     -- ^[a-z0-9_]+$ , 1-64 chars
+  description TEXT,                       -- 1-500 chars
+  version TEXT DEFAULT '1.0.0',           -- semver
+  input_schema TEXT NOT NULL,             -- JSON Schema string
+  output_schema TEXT,                     -- JSON Schema string
+  tags TEXT,                              -- JSON array as string
+  endpoint TEXT NOT NULL,                 -- Agent's tool endpoint URL
+  auth_type TEXT DEFAULT 'bearer',        -- bearer | api_key | none
+  auth_config_encrypted TEXT,             -- 암호화된 인증 설정
+  rate_limit_per_min INTEGER DEFAULT 60,
+  pricing_model TEXT DEFAULT 'free',      -- free | per_call | subscription
+  price_usd REAL DEFAULT 0,
+  status TEXT DEFAULT 'active',           -- active | inactive | deprecated
+  call_count INTEGER DEFAULT 0,
+  avg_latency_ms REAL DEFAULT 0,
+  success_rate REAL DEFAULT 1.0,
+  deprecated_at TEXT,
+  sunset_date TEXT,
+  created_at TEXT DEFAULT (datetime('now')),
+  updated_at TEXT DEFAULT (datetime('now')),
+  FOREIGN KEY (agent_id) REFERENCES agents(id),
+  UNIQUE(agent_id, name, version)
+);
+
+CREATE TABLE IF NOT EXISTS mcp_tool_tags (
+  tool_id TEXT NOT NULL,
+  tag TEXT NOT NULL,
+  PRIMARY KEY (tool_id, tag),
+  FOREIGN KEY (tool_id) REFERENCES mcp_tools(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_mcp_tools_agent ON mcp_tools(agent_id);
+CREATE INDEX IF NOT EXISTS idx_mcp_tools_status ON mcp_tools(status);
+CREATE INDEX IF NOT EXISTS idx_mcp_tools_name ON mcp_tools(name);
+CREATE INDEX IF NOT EXISTS idx_mcp_tool_tags_tag ON mcp_tool_tags(tag);

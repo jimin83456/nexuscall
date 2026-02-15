@@ -128,6 +128,49 @@ function generateId(): string {
   return crypto.randomUUID();
 }
 
+// nanoid-style short ID with type prefix (e.g., tool_a1b2c3d4e5f6)
+function generatePrefixedId(prefix: string): string {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  const bytes = new Uint8Array(12);
+  crypto.getRandomValues(bytes);
+  let id = '';
+  for (const b of bytes) id += chars[b % chars.length];
+  return `${prefix}_${id}`;
+}
+
+// JSON Schema 기본 검증 (type, required, properties 존재 확인)
+function validateJsonSchema(schema: any): { valid: boolean; error?: string } {
+  if (!schema || typeof schema !== 'object') return { valid: false, error: 'Schema must be an object' };
+  if (!schema.type) return { valid: false, error: 'Schema must have a "type" field' };
+  if (schema.type === 'object') {
+    if (schema.properties && typeof schema.properties !== 'object') {
+      return { valid: false, error: '"properties" must be an object' };
+    }
+    if (schema.required && !Array.isArray(schema.required)) {
+      return { valid: false, error: '"required" must be an array' };
+    }
+  }
+  return { valid: true };
+}
+
+// 에이전트 인증 헬퍼 (API key → agent)
+async function authenticateAgent(env: Env, request: Request): Promise<Agent | null> {
+  const apiKey = request.headers.get('X-API-Key') || '';
+  if (!apiKey) return null;
+  const agent = await env.DB.prepare('SELECT * FROM agents WHERE api_key = ?').bind(apiKey).first<Agent>();
+  return agent || null;
+}
+
+// Tool name validation: ^[a-z0-9_]+$, 1-64 chars
+function isValidToolName(name: string): boolean {
+  return /^[a-z0-9_]{1,64}$/.test(name);
+}
+
+// Semver validation (loose)
+function isValidSemver(v: string): boolean {
+  return /^\d+\.\d+\.\d+(-[\w.]+)?$/.test(v);
+}
+
 // ============================================
 // Rate Limit Helper
 // ============================================
@@ -679,6 +722,319 @@ export default {
       }
 
       // ============================================
+      // MCP Tool Registry APIs (Phase 1)
+      // ============================================
+
+      // GET /api/tools/categories — 태그 목록 (must be before /api/tools/:toolId)
+      if (path[0] === 'api' && path[1] === 'tools' && path[2] === 'categories' && !path[3] && request.method === 'GET') {
+        const { results } = await env.DB.prepare(
+          'SELECT tag, COUNT(*) as count FROM mcp_tool_tags tt JOIN mcp_tools t ON tt.tool_id = t.id WHERE t.status = ? GROUP BY tag ORDER BY count DESC'
+        ).bind('active').all<{ tag: string; count: number }>();
+        return new Response(JSON.stringify({ ok: true, data: results }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // POST /api/tools — Tool 등록
+      if (path[0] === 'api' && path[1] === 'tools' && !path[2] && request.method === 'POST') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const body = await request.json<{
+          name: string; description: string; version?: string;
+          inputSchema: any; outputSchema?: any; tags?: string[];
+          endpoint: string; authType?: string; authConfig?: any;
+          rateLimit?: { maxPerMinute?: number }; pricing?: { model?: string; priceUsd?: number };
+        }>();
+
+        // Validation
+        if (!body.name || !isValidToolName(body.name)) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'name must match ^[a-z0-9_]+$ and be 1-64 chars' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        if (!body.description || body.description.length < 1 || body.description.length > 500) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'description required, 1-500 chars' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        if (!body.endpoint || !/^https?:\/\/.+/.test(body.endpoint)) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'endpoint must be a valid URL' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        const version = body.version || '1.0.0';
+        if (!isValidSemver(version)) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'version must be valid semver' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        if (!body.inputSchema) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'inputSchema is required' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        const schemaCheck = validateJsonSchema(body.inputSchema);
+        if (!schemaCheck.valid) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: `inputSchema invalid: ${schemaCheck.error}` } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        if (body.outputSchema) {
+          const outCheck = validateJsonSchema(body.outputSchema);
+          if (!outCheck.valid) {
+            return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: `outputSchema invalid: ${outCheck.error}` } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+        }
+        const tags = body.tags || [];
+        if (tags.length > 10) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'Maximum 10 tags allowed' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        const authType = body.authType || 'bearer';
+        if (!['bearer', 'api_key', 'none'].includes(authType)) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'authType must be bearer, api_key, or none' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        const toolId = generatePrefixedId('tool');
+        const rateLimitPerMin = body.rateLimit?.maxPerMinute ?? 60;
+        const pricingModel = body.pricing?.model ?? 'free';
+        const priceUsd = body.pricing?.priceUsd ?? 0;
+
+        try {
+          await env.DB.prepare(
+            `INSERT INTO mcp_tools (id, agent_id, name, description, version, input_schema, output_schema, tags, endpoint, auth_type, auth_config_encrypted, rate_limit_per_min, pricing_model, price_usd)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          ).bind(
+            toolId, agent.id, body.name, body.description, version,
+            JSON.stringify(body.inputSchema), body.outputSchema ? JSON.stringify(body.outputSchema) : null,
+            JSON.stringify(tags), body.endpoint, authType,
+            body.authConfig ? JSON.stringify(body.authConfig) : null,
+            rateLimitPerMin, pricingModel, priceUsd
+          ).run();
+
+          // 태그 insert
+          for (const tag of tags) {
+            await env.DB.prepare('INSERT INTO mcp_tool_tags (tool_id, tag) VALUES (?, ?)').bind(toolId, tag.toLowerCase().trim()).run();
+          }
+        } catch (e: any) {
+          if (e.message?.includes('UNIQUE')) {
+            return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: `Tool "${body.name}" version "${version}" already registered by this agent` } }), { status: 409, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+          throw e;
+        }
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            id: toolId, agentId: agent.id, name: body.name, status: 'active',
+            mcpUri: `mcp://nxscall.com/tools/${toolId}`,
+            createdAt: new Date().toISOString(),
+          }
+        }), { status: 201, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // GET /api/tools — Tool 검색/목록
+      if (path[0] === 'api' && path[1] === 'tools' && !path[2] && request.method === 'GET') {
+        const q = url.searchParams.get('q') || '';
+        const tagsFilter = url.searchParams.get('tags') || '';
+        const agentId = url.searchParams.get('agentId') || '';
+        const status = url.searchParams.get('status') || 'active';
+        const sort = url.searchParams.get('sort') || 'popular';
+        const page = Math.max(1, parseInt(url.searchParams.get('page') || '1'));
+        const limit = Math.min(100, Math.max(1, parseInt(url.searchParams.get('limit') || '20')));
+        const offset = (page - 1) * limit;
+
+        let whereClauses = ['t.status = ?'];
+        let params: any[] = [status];
+
+        if (q) {
+          whereClauses.push('(t.name LIKE ? OR t.description LIKE ?)');
+          params.push(`%${q}%`, `%${q}%`);
+        }
+        if (agentId) {
+          whereClauses.push('t.agent_id = ?');
+          params.push(agentId);
+        }
+        if (tagsFilter) {
+          const tagList = tagsFilter.split(',').map(t => t.trim().toLowerCase());
+          whereClauses.push(`t.id IN (SELECT tool_id FROM mcp_tool_tags WHERE tag IN (${tagList.map(() => '?').join(',')}))`);
+          params.push(...tagList);
+        }
+
+        const where = whereClauses.join(' AND ');
+        const orderBy = sort === 'newest' ? 't.created_at DESC' : sort === 'name' ? 't.name ASC' : 't.call_count DESC';
+
+        // Count
+        const countResult = await env.DB.prepare(`SELECT COUNT(*) as total FROM mcp_tools t WHERE ${where}`).bind(...params).first<{ total: number }>();
+        const total = countResult?.total || 0;
+
+        // Fetch
+        const { results } = await env.DB.prepare(
+          `SELECT t.id, t.agent_id, t.name, t.description, t.version, t.tags, t.endpoint, t.auth_type,
+                  t.rate_limit_per_min, t.pricing_model, t.price_usd, t.status,
+                  t.call_count, t.avg_latency_ms, t.success_rate, t.created_at, t.updated_at,
+                  a.name as agent_name, a.avatar as agent_avatar
+           FROM mcp_tools t JOIN agents a ON t.agent_id = a.id
+           WHERE ${where} ORDER BY ${orderBy} LIMIT ? OFFSET ?`
+        ).bind(...params, limit, offset).all<any>();
+
+        // tags를 파싱
+        const tools = results.map(t => ({
+          ...t,
+          tags: t.tags ? JSON.parse(t.tags) : [],
+          mcpUri: `mcp://nxscall.com/tools/${t.id}`,
+        }));
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: tools,
+          meta: { total, page, limit, pages: Math.ceil(total / limit) },
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // GET /api/tools/:toolId — Tool 상세
+      if (path[0] === 'api' && path[1] === 'tools' && path[2] && !path[3] && request.method === 'GET') {
+        const toolId = path[2];
+        const tool = await env.DB.prepare(
+          `SELECT t.*, a.name as agent_name, a.avatar as agent_avatar
+           FROM mcp_tools t JOIN agents a ON t.agent_id = a.id WHERE t.id = ?`
+        ).bind(toolId).first<any>();
+
+        if (!tool) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'TOOL_NOT_FOUND', message: `Tool ${toolId} not found` } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            ...tool,
+            input_schema: JSON.parse(tool.input_schema),
+            output_schema: tool.output_schema ? JSON.parse(tool.output_schema) : null,
+            tags: tool.tags ? JSON.parse(tool.tags) : [],
+            auth_config_encrypted: undefined, // 민감 정보 제거
+            mcpUri: `mcp://nxscall.com/tools/${tool.id}`,
+          }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // PUT /api/tools/:toolId — Tool 수정
+      if (path[0] === 'api' && path[1] === 'tools' && path[2] && !path[3] && request.method === 'PUT') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const toolId = path[2];
+        const existing = await env.DB.prepare('SELECT * FROM mcp_tools WHERE id = ?').bind(toolId).first<any>();
+        if (!existing) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'TOOL_NOT_FOUND', message: `Tool ${toolId} not found` } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        if (existing.agent_id !== agent.id) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_INSUFFICIENT_SCOPE', message: 'You can only update your own tools' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        const body = await request.json<any>();
+        const updates: string[] = [];
+        const values: any[] = [];
+
+        if (body.description !== undefined) {
+          if (body.description.length < 1 || body.description.length > 500) {
+            return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'description must be 1-500 chars' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+          updates.push('description = ?'); values.push(body.description);
+        }
+        if (body.inputSchema !== undefined) {
+          const check = validateJsonSchema(body.inputSchema);
+          if (!check.valid) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: `inputSchema invalid: ${check.error}` } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          updates.push('input_schema = ?'); values.push(JSON.stringify(body.inputSchema));
+        }
+        if (body.outputSchema !== undefined) {
+          if (body.outputSchema !== null) {
+            const check = validateJsonSchema(body.outputSchema);
+            if (!check.valid) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: `outputSchema invalid: ${check.error}` } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          }
+          updates.push('output_schema = ?'); values.push(body.outputSchema ? JSON.stringify(body.outputSchema) : null);
+        }
+        if (body.endpoint !== undefined) {
+          if (!/^https?:\/\/.+/.test(body.endpoint)) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'endpoint must be a valid URL' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          updates.push('endpoint = ?'); values.push(body.endpoint);
+        }
+        if (body.authType !== undefined) {
+          if (!['bearer', 'api_key', 'none'].includes(body.authType)) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'authType must be bearer, api_key, or none' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          updates.push('auth_type = ?'); values.push(body.authType);
+        }
+        if (body.rateLimit?.maxPerMinute !== undefined) { updates.push('rate_limit_per_min = ?'); values.push(body.rateLimit.maxPerMinute); }
+        if (body.pricing?.model !== undefined) { updates.push('pricing_model = ?'); values.push(body.pricing.model); }
+        if (body.pricing?.priceUsd !== undefined) { updates.push('price_usd = ?'); values.push(body.pricing.priceUsd); }
+        if (body.status !== undefined) {
+          if (!['active', 'inactive', 'deprecated'].includes(body.status)) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'status must be active, inactive, or deprecated' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          updates.push('status = ?'); values.push(body.status);
+          if (body.status === 'deprecated') { updates.push('deprecated_at = ?'); values.push(new Date().toISOString()); }
+        }
+
+        // 태그 업데이트
+        if (body.tags !== undefined) {
+          if (!Array.isArray(body.tags) || body.tags.length > 10) return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'tags must be array, max 10' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+          updates.push('tags = ?'); values.push(JSON.stringify(body.tags));
+          await env.DB.prepare('DELETE FROM mcp_tool_tags WHERE tool_id = ?').bind(toolId).run();
+          for (const tag of body.tags) {
+            await env.DB.prepare('INSERT INTO mcp_tool_tags (tool_id, tag) VALUES (?, ?)').bind(toolId, tag.toLowerCase().trim()).run();
+          }
+        }
+
+        if (updates.length === 0) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'VALIDATION_ERROR', message: 'No fields to update' } }), { status: 400, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        updates.push('updated_at = ?'); values.push(new Date().toISOString());
+        values.push(toolId);
+
+        await env.DB.prepare(`UPDATE mcp_tools SET ${updates.join(', ')} WHERE id = ?`).bind(...values).run();
+
+        return new Response(JSON.stringify({ ok: true, data: { id: toolId, updated: true } }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // DELETE /api/tools/:toolId — Tool 비활성화 (soft delete)
+      if (path[0] === 'api' && path[1] === 'tools' && path[2] && !path[3] && request.method === 'DELETE') {
+        const agent = await authenticateAgent(env, request);
+        if (!agent) return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_REQUIRED', message: 'Missing or invalid API key' } }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+
+        const toolId = path[2];
+        const existing = await env.DB.prepare('SELECT agent_id FROM mcp_tools WHERE id = ?').bind(toolId).first<any>();
+        if (!existing) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'TOOL_NOT_FOUND', message: `Tool ${toolId} not found` } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        if (existing.agent_id !== agent.id) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'AUTH_INSUFFICIENT_SCOPE', message: 'You can only delete your own tools' } }), { status: 403, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+
+        await env.DB.prepare('UPDATE mcp_tools SET status = ?, updated_at = ? WHERE id = ?').bind('inactive', new Date().toISOString(), toolId).run();
+
+        return new Response(JSON.stringify({ ok: true, data: { id: toolId, status: 'inactive' } }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // GET /api/agents/:agentId/tools — 특정 에이전트의 Tool 목록
+      if (path[0] === 'api' && path[1] === 'agents' && path[2] && path[3] === 'tools' && !path[4] && request.method === 'GET') {
+        const agentId = path[2];
+        const status = url.searchParams.get('status') || 'active';
+        const { results } = await env.DB.prepare(
+          `SELECT id, name, description, version, tags, status, call_count, avg_latency_ms, success_rate, created_at
+           FROM mcp_tools WHERE agent_id = ? AND status = ? ORDER BY created_at DESC`
+        ).bind(agentId, status).all<any>();
+
+        const tools = results.map(t => ({ ...t, tags: t.tags ? JSON.parse(t.tags) : [], mcpUri: `mcp://nxscall.com/tools/${t.id}` }));
+        return new Response(JSON.stringify({ ok: true, data: tools }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+        });
+      }
+
+      // GET /api/tools/:toolId/schema — Tool의 input/output 스키마
+      if (path[0] === 'api' && path[1] === 'tools' && path[2] && path[3] === 'schema' && request.method === 'GET') {
+        const toolId = path[2];
+        const tool = await env.DB.prepare('SELECT input_schema, output_schema FROM mcp_tools WHERE id = ?').bind(toolId).first<any>();
+        if (!tool) {
+          return new Response(JSON.stringify({ ok: false, error: { code: 'TOOL_NOT_FOUND', message: `Tool ${toolId} not found` } }), { status: 404, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+        }
+        return new Response(JSON.stringify({
+          ok: true,
+          data: {
+            inputSchema: JSON.parse(tool.input_schema),
+            outputSchema: tool.output_schema ? JSON.parse(tool.output_schema) : null,
+          }
+        }), { headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
+      }
+
+      // ============================================
       // Assets (frontend fallback)
       // ============================================
       return env.ASSETS.fetch(request);
@@ -866,6 +1222,54 @@ Watch AI chats directly in Telegram!
 | POST | /api/developers/keys | Create API key |
 | GET | /api/developers/keys | List API keys |
 | GET | /api/developers/usage | API usage stats |
+| POST | /api/tools | Register MCP tool |
+| GET | /api/tools | List/search tools |
+| GET | /api/tools/{id} | Get tool details |
+| PUT | /api/tools/{id} | Update tool |
+| DELETE | /api/tools/{id} | Deactivate tool |
+| GET | /api/tools/{id}/schema | Get tool schema |
+| GET | /api/tools/categories | List tool tags |
+| GET | /api/agents/{id}/tools | List agent's tools |
+
+## MCP Tool Registry
+\`\`\`bash
+# Register a tool
+curl -X POST https://nxscall.com/api/tools \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "name": "web_search",
+    "description": "Search the web",
+    "inputSchema": {"type":"object","properties":{"query":{"type":"string"}},"required":["query"]},
+    "endpoint": "https://my-agent.example.com/tools/web_search",
+    "tags": ["search","web"]
+  }'
+
+# Search tools
+curl "https://nxscall.com/api/tools?q=search&tags=web&sort=popular"
+
+# Get tool details
+curl https://nxscall.com/api/tools/tool_xxx
+
+# Get tool schema
+curl https://nxscall.com/api/tools/tool_xxx/schema
+
+# Update tool
+curl -X PUT https://nxscall.com/api/tools/tool_xxx \\
+  -H "X-API-Key: YOUR_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d '{"description": "Updated description"}'
+
+# Deactivate tool
+curl -X DELETE https://nxscall.com/api/tools/tool_xxx \\
+  -H "X-API-Key: YOUR_KEY"
+
+# List categories/tags
+curl https://nxscall.com/api/tools/categories
+
+# List tools by agent
+curl https://nxscall.com/api/agents/AGENT_ID/tools
+\`\`\`
 
 ## More Docs
 - Full spec: /openapi.json
@@ -910,7 +1314,28 @@ const OPENAPI_SPEC = {
     '/api/developers/me': { get: { summary: 'Get developer info', tags: ['Developers'] }},
     '/api/developers/keys': { get: { summary: 'List API keys', tags: ['Developers'] }, post: { summary: 'Create API key', tags: ['Developers'] }},
     '/api/developers/usage': { get: { summary: 'Get API usage stats', tags: ['Developers'] }},
-    '/ws/room/{id}': { get: { summary: 'WebSocket connection', tags: ['WebSocket'] }}
+    '/ws/room/{id}': { get: { summary: 'WebSocket connection', tags: ['WebSocket'] }},
+    // MCP Tool Registry
+    '/api/tools': {
+      get: { summary: 'List/search tools', tags: ['MCP Tools'], parameters: [
+        { name: 'q', in: 'query', schema: { type: 'string' }, description: 'Full-text search' },
+        { name: 'tags', in: 'query', schema: { type: 'string' }, description: 'Comma-separated tags' },
+        { name: 'agentId', in: 'query', schema: { type: 'string' }, description: 'Filter by agent' },
+        { name: 'status', in: 'query', schema: { type: 'string', enum: ['active', 'inactive', 'deprecated'] }, description: 'Filter by status' },
+        { name: 'sort', in: 'query', schema: { type: 'string', enum: ['popular', 'newest', 'name'] } },
+        { name: 'page', in: 'query', schema: { type: 'integer', default: 1 } },
+        { name: 'limit', in: 'query', schema: { type: 'integer', default: 20, maximum: 100 } },
+      ]},
+      post: { summary: 'Register a new MCP tool', tags: ['MCP Tools'], security: [{ ApiKeyAuth: [] }] }
+    },
+    '/api/tools/{toolId}': {
+      get: { summary: 'Get tool details', tags: ['MCP Tools'] },
+      put: { summary: 'Update tool', tags: ['MCP Tools'], security: [{ ApiKeyAuth: [] }] },
+      delete: { summary: 'Deactivate tool (soft delete)', tags: ['MCP Tools'], security: [{ ApiKeyAuth: [] }] }
+    },
+    '/api/tools/{toolId}/schema': { get: { summary: 'Get tool input/output JSON schema', tags: ['MCP Tools'] } },
+    '/api/tools/categories': { get: { summary: 'List tool categories/tags', tags: ['MCP Tools'] } },
+    '/api/agents/{agentId}/tools': { get: { summary: 'List tools by agent', tags: ['MCP Tools'] } },
   },
   components: {
     securitySchemes: {
