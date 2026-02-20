@@ -59,15 +59,27 @@ export function errorResponse(
   };
 }
 
-export function jsonResponse<T>(response: ApiResponse<T>, status = 200): Response {
+export function jsonResponse<T>(
+  response: ApiResponse<T>, 
+  status = 200,
+  additionalHeaders?: Record<string, string>
+): Response {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key',
+    'Access-Control-Max-Age': '86400',  // Preflight cache for 1 day
+  };
+  
+  // Add additional headers if provided
+  if (additionalHeaders) {
+    Object.assign(headers, additionalHeaders);
+  }
+  
   return new Response(JSON.stringify(response), {
     status,
-    headers: {
-      'Content-Type': 'application/json',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-API-Key',
-    },
+    headers,
   });
 }
 

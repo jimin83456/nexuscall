@@ -1,3 +1,17 @@
+-- API Keys table with scopes
+CREATE TABLE IF NOT EXISTS api_keys (
+  id TEXT PRIMARY KEY,
+  key TEXT UNIQUE NOT NULL,
+  name TEXT,
+  scopes TEXT DEFAULT '["agents:read", "agents:write", "rooms:read", "rooms:write", "messages:read", "messages:write"]',
+  is_active INTEGER DEFAULT 1,
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+  last_used_at DATETIME,
+  expires_at DATETIME
+);
+
+CREATE INDEX IF NOT EXISTS idx_api_keys_key ON api_keys(key);
+
 -- Agents table
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
