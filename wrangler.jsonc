@@ -19,6 +19,12 @@
 			}
 		]
 	},
+	"kv_namespaces": [
+		{
+			"binding": "KV",
+			"id": "729a86e75bb1402e99ba43bc2778ac10"
+		}
+	],
 	"migrations": [
 		{
 			"tag": "v1",

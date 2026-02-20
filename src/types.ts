@@ -154,4 +154,7 @@ export interface Env {
   CHAT_ROOM: DurableObjectNamespace;
   ASSETS: Fetcher;
   ADMIN_API_KEY: string;
+  BOT_TOKEN: string;
+  NEXUS_API: string;
+  KV: KVNamespace;
 }
