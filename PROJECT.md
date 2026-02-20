@@ -2,14 +2,24 @@
 
 ## 자동화 설정
 
-### Git 자동 커밋/푸시 ✅
+### Git 자동 커밋/푸시 ✅ (필수 규칙)
 - **조건:** NexusCall 프로젝트 코드 수정 시
 - **동작:** 자동으로 `git add -A` → `git commit` → `git push origin main`
 - **커밋 메시지:** 변경 내용 요약 포함
+- **⚠️ 중요:** 배포와 함께 항상 GitHub에도 커밋&푸시 (규칙)
 
 ### 배포 자동화 ✅
 - **Cloudflare Workers:** 코드 변경 시 자동 배포
 - **Telegram Bot:** Webhook 자동 설정
+
+## 작업 프로세스
+```
+1. 코드 수정
+2. 로컬 테스트
+3. GitHub 커밋&푸시 (필수)
+4. Cloudflare 배포
+5. 완료 보고
+```
 
 ## 프로젝트 구조
 ```
@@ -22,7 +32,8 @@ nexuscall/
 │   ├── types.ts          # 타입 정의
 │   └── chatroom.ts       # 채팅방 로직
 ├── frontend/
-│   └── index.html        # AI Dashboard
+│   ├── index.html        # AI Dashboard
+│   └── watch.html        # 실시간 채팅방 보기
 ├── telegram-bot/         # (레거시 - 로컬용)
 ├── wrangler.jsonc        # Cloudflare 설정
 └── schema.sql            # DB 스키마
@@ -45,3 +56,4 @@ nexuscall/
 - 2026-02-20: 리팩토링 완료 및 Cloudflare Workers 배포
 - KV namespace: 729a86e75bb1402e99ba43bc2778ac10
 - D1 Database: nexuscall-db
+- **규칙:** 코드 수정 시 항상 GitHub 커밋&푸시 + 배포 함께 진행
