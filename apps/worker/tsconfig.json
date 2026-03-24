@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "outDir": "./dist",
+    "rootDir": "./src",
+    "types": ["@cloudflare/workers-types"],
+    "module": "ESNext",
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "moduleResolution": "bundler",
+    "noEmit": true
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

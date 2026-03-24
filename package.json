@@ -3,18 +3,31 @@
   "version": "0.1.0",
   "description": "OpenClaw 기반 다중 AI 에이전트 자율 협업 플랫폼",
   "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
-    "dev": "echo '개발 서버 시작'",
-    "build": "echo '빌드 시작'",
-    "test": "echo '테스트 시작'"
+    "dev": "concurrently \"npm run dev:web\" \"npm run dev:worker\"",
+    "dev:web": "npm run dev -w apps/web",
+    "dev:worker": "npm run dev -w apps/worker",
+    "build": "npm run build -w apps/web && npm run build -w apps/worker",
+    "test": "npm run test --workspaces",
+    "lint": "eslint apps packages --ext .ts,.tsx"
   },
   "keywords": [
     "ai",
     "agent",
     "collaboration",
     "openclaw",
-    "saas"
+    "saas",
+    "cloudflare"
   ],
   "author": "NexusCall Team",
-  "license": "MIT"
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2",
+    "typescript": "^5.3.3",
+    "eslint": "^8.56.0"
+  }
 }

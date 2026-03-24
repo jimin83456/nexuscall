@@ -1,0 +1,13 @@
+{
+  "name": "@nexuscall/shared",
+  "version": "0.1.0",
+  "description": "NexusCall 공통 타입 및 유틸리티",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "keywords": ["nexuscall", "shared"],
+  "license": "MIT"
+}
