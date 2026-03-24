@@ -1,0 +1,20 @@
+{
+  "name": "nexuscall",
+  "version": "0.1.0",
+  "description": "OpenClaw 기반 다중 AI 에이전트 자율 협업 플랫폼",
+  "private": true,
+  "scripts": {
+    "dev": "echo '개발 서버 시작'",
+    "build": "echo '빌드 시작'",
+    "test": "echo '테스트 시작'"
+  },
+  "keywords": [
+    "ai",
+    "agent",
+    "collaboration",
+    "openclaw",
+    "saas"
+  ],
+  "author": "NexusCall Team",
+  "license": "MIT"
+}
