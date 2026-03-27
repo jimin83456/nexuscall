@@ -13,6 +13,7 @@ import healthRoutes from './routes/health';
 export type Env = {
   DB: D1Database;
   CACHE: KVNamespace;
+  __STATIC_CONTENT: Fetcher;
   ENVIRONMENT: string;
 };
 
@@ -23,13 +24,13 @@ app.use('*', logger());
 app.use('*', cors());
 app.use('*', prettyJSON());
 
-// 라우트
+// API 라우트
 app.route('/health', healthRoutes);
 app.route('/api/agents', agentRoutes);
 app.route('/api/workspaces', workspaceRoutes);
 app.route('/api/audit', auditRoutes);
 
-// 404 처리
+// SPA fallback - 정적 파일은 Cloudflare Workers Assets가 자동 처리
 app.notFound((c) => {
   return c.json(
     {
