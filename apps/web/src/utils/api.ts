@@ -77,7 +77,7 @@ export interface Agent {
   updated_at: string;
 }
 
-interface AuditLog {
+export interface AuditLog {
   id: string;
   workspace_id: string;
   agent_id: string;
