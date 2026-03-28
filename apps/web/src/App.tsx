@@ -28,6 +28,7 @@ function App() {
       {/* 공개 라우트 */}
       <Route path="/" element={<Home />} />
       <Route path="/login" element={<Login />} />
+      <Route path="/signup" element={<Register />} />
       <Route path="/register" element={<Register />} />
       <Route path="/pricing" element={<Pricing />} />
       

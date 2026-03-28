@@ -30,11 +30,7 @@ new_sqlite_classes = ["WorkspaceRoom"]
 [assets]
 directory = "./apps/web/dist"
 binding = "__STATIC_CONTENT"
-
-[assets.rules]
-type = "Text"
-fallback = "/index.html"
-# SPA 라우팅: /signup, /workspaces 등을 index.html로
+not_found_handling = "single-page-application"
 
 [observability]
 enabled = true
