@@ -1,8 +1,21 @@
-import { Context } from 'hono';
+import type { Context } from 'hono';
 import type { Env } from '../index';
 import { verifyJWT } from '../utils/auth';
 
-export async function authMiddleware(c: Context<{ Bindings: Env }>, next: () => Promise<void>) {
+// 사용자 타입
+interface User {
+  id: string;
+  email: string;
+  name: string;
+}
+
+// 컨텍스트 변수 타입 확장
+type Variables = {
+  user: User;
+};
+
+// 인증 미들웨어
+export async function authMiddleware(c: Context<{ Bindings: Env }, next: () => Promise<void>) {
   const authHeader = c.req.header('Authorization');
   
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -17,13 +30,13 @@ export async function authMiddleware(c: Context<{ Bindings: Env }>, next: () => 
   }
   
   const token = authHeader.substring(7);
-  const { valid, payload } = await verifyJWT(token, c.env);
+  const result = await verifyJWT(token, c.env);
   
-  if (!valid) {
+  if (!result.valid || !result.payload) {
     return c.json({
       success: false,
       error: {
-        code: 'INVALID_TOKEN',
+        code: 'UNAUTHORIZED',
         message: '유효하지 않은 토큰입니다.',
       },
       timestamp: new Date().toISOString(),
@@ -31,21 +44,29 @@ export async function authMiddleware(c: Context<{ Bindings: Env }>, next: () => 
   }
   
   // 사용자 정보를 컨텍스트에 저장
-  c.set('user', payload);
+  c.set('user', {
+    id: result.payload.id as string,
+    email: result.payload.email as string,
+    name: result.payload.name as string,
+  });
   
   await next();
 }
 
-// 선택적 인증 (토큰이 있으면 검증, 없어도 통과)
+// 선택적 인증 미들웨어
 export async function optionalAuth(c: Context<{ Bindings: Env }>, next: () => Promise<void>) {
   const authHeader = c.req.header('Authorization');
   
   if (authHeader && authHeader.startsWith('Bearer ')) {
     const token = authHeader.substring(7);
-    const { valid, payload } = await verifyJWT(token, c.env);
+    const result = await verifyJWT(token, c.env);
     
-    if (valid && payload) {
-      c.set('user', payload);
+    if (result.valid && result.payload) {
+      c.set('user', {
+        id: result.payload.id as string,
+        email: result.payload.email as string,
+        name: result.payload.name as string,
+      });
     }
   }
   

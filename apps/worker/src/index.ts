@@ -4,6 +4,9 @@ import { logger } from 'hono/logger';
 import { prettyJSON } from 'hono/pretty-json';
 import { serveStatic } from 'hono/cloudflare-workers';
 
+// Durable Objects
+export { WorkspaceRoom } from './durable-objects/WorkspaceRoom';
+
 // 라우트
 import agentRoutes from './routes/agents';
 import workspaceRoutes from './routes/workspaces';
@@ -11,6 +14,7 @@ import auditRoutes from './routes/audit';
 import healthRoutes from './routes/health';
 import authRoutes from './routes/auth';
 import realtimeRoutes from './routes/realtime';
+import agentExecuteRoutes from './routes/agent-execute';
 
 // 타입 정의
 export type Env = {
@@ -19,6 +23,7 @@ export type Env = {
   __STATIC_CONTENT: Fetcher;
   ENVIRONMENT: string;
   JWT_SECRET?: string;
+  WORKSPACE_ROOM: DurableObjectNamespace;
 };
 
 const app = new Hono<{ Bindings: Env }>();
@@ -39,6 +44,7 @@ app.route('/api/agents', agentRoutes);
 app.route('/api/workspaces', workspaceRoutes);
 app.route('/api/audit', auditRoutes);
 app.route('/api/realtime', realtimeRoutes);
+app.route('/api/execute', agentExecuteRoutes);
 
 // SPA fallback - index.html 반환
 app.get('*', async (c) => {

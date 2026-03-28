@@ -1,160 +1,170 @@
-import { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback, useState } from 'react';
 import { useAuthStore } from '../stores/authStore';
 
 interface RealtimeEvent {
   id: string;
   type: string;
-  workspace_id: string;
-  user_id: string;
   payload: any;
   timestamp: string;
+  agentId?: string;
 }
 
 interface UseRealtimeOptions {
   workspaceId: string;
   onEvent?: (event: RealtimeEvent) => void;
-  pollingInterval?: number; // milliseconds
   enabled?: boolean;
 }
 
 export function useRealtime({
   workspaceId,
   onEvent,
-  pollingInterval = 5000, // 기본 5초
   enabled = true,
 }: UseRealtimeOptions) {
-  const { token } = useAuthStore();
-  const eventSourceRef = useRef<EventSource | null>(null);
-  const pollingIntervalRef = useRef<number | null>(null);
-  const lastEventIdRef = useRef<string>('');
+  const token = useAuthStore((state) => state.token);
+  const [isConnected, setIsConnected] = useState(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<number | null>(null);
+  const messageQueueRef = useRef<RealtimeEvent[]>([]);
 
   // 이벤트 처리
   const handleEvent = useCallback((event: RealtimeEvent) => {
-    if (event.id !== lastEventIdRef.current) {
-      lastEventIdRef.current = event.id;
-      onEvent?.(event);
-    }
+    onEvent?.(event);
   }, [onEvent]);
 
-  // SSE 연결 (Server-Sent Events)
-  const connectSSE = useCallback(() => {
-    if (!token || !enabled) return;
+  // WebSocket 연결
+  const connect = useCallback(() => {
+    if (!token || !enabled || !workspaceId) return;
 
-    const eventSource = new EventSource(
-      `/api/realtime/connect?token=${token}`
-    );
-
-    eventSource.onopen = () => {
-      console.log('[Realtime] SSE connected');
-    };
-
-    eventSource.addEventListener('connected', (e: MessageEvent) => {
-      const data = JSON.parse(e.data);
-      console.log('[Realtime] Connected as:', data.userId);
-    });
-
-    eventSource.addEventListener('message', (e: MessageEvent) => {
-      try {
-        const event = JSON.parse(e.data) as RealtimeEvent;
-        handleEvent(event);
-      } catch (err) {
-        console.error('[Realtime] Failed to parse event:', err);
-      }
-    });
-
-    eventSource.addEventListener('ping', (e: MessageEvent) => {
-      // Keep-alive ping
-    });
-
-    eventSource.onerror = (err) => {
-      console.error('[Realtime] SSE error:', err);
-      eventSource.close();
-      
-      // 5초 후 재연결 시도
-      setTimeout(() => {
-        if (enabled) {
-          connectSSE();
-        }
-      }, 5000);
-    };
-
-    eventSourceRef.current = eventSource;
-  }, [token, enabled, handleEvent]);
-
-  // 폴링 (fallback)
-  const startPolling = useCallback(async () => {
-    if (!token || !enabled) return;
-
-    try {
-      const response = await fetch(
-        `/api/realtime/events/${workspaceId}?last_event_id=${lastEventIdRef.current}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
-        }
-      );
-
-      const data = await response.json();
-
-      if (data.success && data.data.events) {
-        data.data.events.forEach((event: RealtimeEvent) => {
-          handleEvent(event);
-        });
-      }
-    } catch (err) {
-      console.error('[Realtime] Polling error:', err);
+    // 기존 연결 종료
+    if (wsRef.current) {
+      wsRef.current.close();
     }
-  }, [token, workspaceId, enabled, handleEvent]);
+
+    // WebSocket URL 생성 (토큰을 쿼리 파라미터로 전달)
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsUrl = `${wsProtocol}//${window.location.host}/api/realtime/ws/${workspaceId}?token=${encodeURIComponent(token)}`;
+    
+    const ws = new WebSocket(wsUrl);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      console.log('[WebSocket] Connected');
+      setIsConnected(true);
+      
+      // 대기 중인 메시지 전송
+      while (messageQueueRef.current.length > 0) {
+        const event = messageQueueRef.current.shift();
+        if (event) {
+          ws.send(JSON.stringify(event));
+        }
+      }
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data) as RealtimeEvent;
+        
+        // 이벤트 타입별 처리
+        if (data.type === 'history') {
+          // 히스토리 메시지들을 이벤트로 변환
+          const messages = data.payload || [];
+          messages.forEach((msg: any) => {
+            handleEvent({
+              id: msg.id,
+              type: 'message',
+              payload: msg,
+              timestamp: new Date(msg.timestamp).toISOString(),
+            });
+          });
+        } else if (data.type === 'pong') {
+          // Ping-Pong 무시
+        } else {
+          handleEvent(data);
+        }
+      } catch (err) {
+        console.error('[WebSocket] Failed to parse message:', err);
+      }
+    };
+
+    ws.onerror = (err) => {
+      console.error('[WebSocket] Error:', err);
+      setIsConnected(false);
+    };
+
+    ws.onclose = () => {
+      console.log('[WebSocket] Disconnected');
+      setIsConnected(false);
+      
+      // 3초 후 재연결
+      reconnectTimeoutRef.current = window.setTimeout(() => {
+        if (enabled) {
+          connect();
+        }
+      }, 3000);
+    };
+  }, [token, enabled, workspaceId, handleEvent]);
 
   // 연결 시작
   useEffect(() => {
-    if (!enabled || !token) return;
-
-    // SSE 시도
-    connectSSE();
-
-    // 폴링 시작 (fallback)
-    startPolling();
-    pollingIntervalRef.current = setInterval(startPolling, pollingInterval);
-
-    // 정리
-    return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
-      }
-      if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current);
-        pollingIntervalRef.current = null;
-      }
-    };
-  }, [enabled, token, connectSSE, startPolling, pollingInterval]);
-
-  // 이벤트 브로드캐스트
-  const broadcast = useCallback(async (type: string, payload: any) => {
-    if (!token) return;
-
-    try {
-      await fetch('/api/realtime/broadcast', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          workspace_id: workspaceId,
-          type,
-          payload,
-        }),
-      });
-    } catch (err) {
-      console.error('[Realtime] Broadcast error:', err);
+    if (enabled && token) {
+      connect();
     }
-  }, [token, workspaceId]);
+
+    // Keep-alive ping (30초마다)
+    const pingInterval = setInterval(() => {
+      if (wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 30000);
+
+    return () => {
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+      if (reconnectTimeoutRef.current) {
+        clearTimeout(reconnectTimeoutRef.current);
+      }
+      clearInterval(pingInterval);
+    };
+  }, [enabled, token, connect]);
+
+  // 메시지 전송
+  const sendMessage = useCallback((content: string, agentId?: string, agentName?: string) => {
+    const event: RealtimeEvent = {
+      id: crypto.randomUUID(),
+      type: 'message',
+      payload: { content, agentName },
+      timestamp: new Date().toISOString(),
+      agentId,
+    };
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(event));
+    } else {
+      // 연결되지 않은 경우 큐에 저장
+      messageQueueRef.current.push(event);
+    }
+  }, []);
+
+  // 에이전트 상태 변경
+  const updateAgentStatus = useCallback((agentId: string, status: 'online' | 'offline' | 'busy' | 'error') => {
+    const event: RealtimeEvent = {
+      id: crypto.randomUUID(),
+      type: 'agent_status',
+      agentId,
+      payload: { status },
+      timestamp: new Date().toISOString(),
+    };
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify(event));
+    }
+  }, []);
 
   return {
-    broadcast,
-    isConnected: !!eventSourceRef.current,
+    isConnected,
+    sendMessage,
+    updateAgentStatus,
   };
 }

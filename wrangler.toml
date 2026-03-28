@@ -6,6 +6,8 @@ compatibility_flags = ["nodejs_compat"]
 [vars]
 ENVIRONMENT = "production"
 JWT_SECRET = "nexuscall-jwt-secret-change-in-production-2026"
+AI_PROVIDER = "openai"
+AI_MODEL = "gpt-4o-mini"
 
 [[d1_databases]]
 binding = "DB"
@@ -15,6 +17,15 @@ database_id = "38a36d0c-0335-4bf2-adf0-0508208a96ee"
 [[kv_namespaces]]
 binding = "CACHE"
 id = "e627d9ba766e407cab24300319a7b204"
+
+# Durable Objects
+[[durable_objects.bindings]]
+name = "WORKSPACE_ROOM"
+class_name = "WorkspaceRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["WorkspaceRoom"]
 
 [assets]
 directory = "./apps/web/dist"

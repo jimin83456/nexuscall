@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { workspacesApi, agentsApi, type Workspace, type Agent } from '../utils/api';
 import { useRealtime } from '../hooks/useRealtime';
+import { useAuthStore } from '../stores/authStore';
 
 interface Message {
   id: string;
@@ -23,6 +24,9 @@ export default function WorkspaceDetail() {
   const [newAgentName, setNewAgentName] = useState('');
   const [newAgentType, setNewAgentType] = useState('custom');
   const [adding, setAdding] = useState(false);
+  const [userInput, setUserInput] = useState('');
+  const [selectedAgentId, setSelectedAgentId] = useState<string>('');
+  const [executing, setExecuting] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // 에이전트 타입 옵션
@@ -39,27 +43,37 @@ export default function WorkspaceDetail() {
   const handleRealtimeEvent = (event: any) => {
     console.log('[Workspace] Realtime event:', event);
     
-    if (event.type === 'message' || event.type === 'message_sent') {
-      const agent = agents.find(a => a.id === event.payload.agent_id);
+    if (event.type === 'message' || event.type === 'message_sent' || event.type === 'agent_message' || event.type === 'agent_result') {
       const newMessage: Message = {
-        id: event.id,
-        agent_id: event.payload.agent_id,
-        agent_name: agent?.name || 'Unknown',
-        content: event.payload.content || event.payload.details,
-        timestamp: event.timestamp,
+        id: event.id || crypto.randomUUID(),
+        agent_id: event.agentId || event.payload?.agent_id || '',
+        agent_name: event.agentName || event.payload?.agent_name || 'Unknown',
+        content: event.content || event.payload?.content || '',
+        timestamp: event.timestamp || new Date().toISOString(),
       };
       setMessages(prev => [...prev, newMessage]);
-    } else if (event.type === 'agent_status_changed') {
+    } else if (event.type === 'agent_status' || event.type === 'agent_status_changed') {
+      const payload = event.payload || event;
       setAgents(prev => prev.map(a => 
-        a.id === event.payload.agent_id 
-          ? { ...a, status: event.payload.status }
+        a.id === payload.agentId 
+          ? { ...a, status: payload.status }
           : a
       ));
+    } else if (event.type === 'agent_thinking' || event.type === 'agent_collaboration') {
+      // 에이전트 상태 메시지
+      const newMessage: Message = {
+        id: crypto.randomUUID(),
+        agent_id: event.agentId,
+        agent_name: event.agentName,
+        content: `💡 ${event.content}`,
+        timestamp: event.timestamp || new Date().toISOString(),
+      };
+      setMessages(prev => [...prev, newMessage]);
     }
   };
 
   // 실시간 연결
-  const { broadcast, isConnected } = useRealtime({
+  const { sendMessage, updateAgentStatus, isConnected } = useRealtime({
     workspaceId: id || '',
     onEvent: handleRealtimeEvent,
     enabled: !!id,
@@ -77,6 +91,42 @@ export default function WorkspaceDetail() {
     }
   }, [id]);
 
+  // 에이전트 실행
+  const executeAgent = async () => {
+    if (!userInput.trim() || !selectedAgentId || !id) return;
+
+    setExecuting(true);
+    
+    try {
+      const token = useAuthStore.getState().token;
+      
+      const response = await fetch('/api/execute/execute', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          workspaceId: id,
+          agentId: selectedAgentId,
+          input: userInput.trim(),
+        }),
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        setUserInput('');
+      } else {
+        alert(data.error?.message || '실행에 실패했습니다.');
+      }
+    } catch (err) {
+      alert('네트워크 오류가 발생했습니다.');
+    } finally {
+      setExecuting(false);
+    }
+  };
+
   const loadWorkspace = async () => {
     if (!id) return;
 
@@ -87,6 +137,12 @@ export default function WorkspaceDetail() {
       if (response.success && response.data) {
         setWorkspace(response.data);
         setAgents((response.data as any).agents || []);
+        
+        // 첫 번째 온라인 에이전트 자동 선택
+        const onlineAgents = ((response.data as any).agents || []).filter((a: Agent) => a.status === 'online');
+        if (onlineAgents.length > 0) {
+          setSelectedAgentId(onlineAgents[0].id);
+        }
       } else {
         setError(response.error?.message || '워크스페이스를 불러오는데 실패했습니다.');
       }
@@ -211,11 +267,19 @@ export default function WorkspaceDetail() {
             {agents.map((agent) => (
               <div
                 key={agent.id}
-                className="flex items-center justify-between p-3 bg-dark-800 rounded-lg group"
+                className={`flex items-center justify-between p-3 rounded-lg group cursor-pointer transition-colors ${
+                  selectedAgentId === agent.id 
+                    ? 'bg-primary-500/20 border border-primary-500' 
+                    : 'bg-dark-800 hover:bg-dark-700'
+                }`}
+                onClick={() => setSelectedAgentId(agent.id)}
               >
                 <div className="flex items-center flex-1">
                   <button
-                    onClick={() => toggleAgentStatus(agent.id, agent.status)}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleAgentStatus(agent.id, agent.status);
+                    }}
                     className={`w-2 h-2 rounded-full mr-3 ${
                       agent.status === 'online' ? 'bg-green-500' : 
                       agent.status === 'busy' ? 'bg-yellow-500' : 
@@ -231,7 +295,10 @@ export default function WorkspaceDetail() {
                   </div>
                 </div>
                 <button
-                  onClick={() => handleDeleteAgent(agent.id, agent.name)}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteAgent(agent.id, agent.name);
+                  }}
                   className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-red-500/20 rounded text-red-400"
                   title="삭제"
                 >
@@ -287,14 +354,17 @@ export default function WorkspaceDetail() {
             {/* 헤더 */}
             <div className="flex items-center justify-between pb-4 border-b border-dark-800">
               <h2 className="text-lg font-semibold text-white">{workspace?.name}</h2>
-              <div className="flex space-x-2">
+              <div className="flex items-center space-x-2">
+                <div className={`flex items-center gap-2 text-sm ${isConnected ? 'text-green-400' : 'text-yellow-400'}`}>
+                  <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400' : 'bg-yellow-400'}`} />
+                  {isConnected ? '연결됨' : '연결 중...'}
+                </div>
                 <button 
                   onClick={() => navigate(`/audit?workspace_id=${id}`)}
                   className="btn btn-secondary text-sm"
                 >
                   감사 로그
                 </button>
-                <button className="btn btn-secondary text-sm">설정</button>
               </div>
             </div>
 
@@ -317,19 +387,11 @@ export default function WorkspaceDetail() {
               </div>
             ) : (
               <>
-                {/* 연결 상태 표시 */}
-                <div className="flex items-center gap-2 px-4 py-2 bg-dark-800/50 text-xs">
-                  <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-yellow-500'}`} />
-                  <span className="text-dark-400">
-                    {isConnected ? '실시간 연결됨' : '연결 중...'}
-                  </span>
-                </div>
-
                 {/* 메시지 */}
                 <div className="flex-1 overflow-y-auto py-4 space-y-4">
                   {messages.length === 0 ? (
                     <div className="text-center text-dark-600 text-sm py-8">
-                      💡 에이전트 간 자율 협업 대화가 여기에 표시됩니다
+                      💡 에이전트에게 작업을 요청하면 여기에 결과가 표시됩니다
                     </div>
                   ) : (
                     messages.map((message) => (
@@ -349,7 +411,7 @@ export default function WorkspaceDetail() {
                                 {new Date(message.timestamp).toLocaleTimeString('ko-KR')}
                               </span>
                             </div>
-                            <p className="text-sm text-dark-300 mt-1">{message.content}</p>
+                            <p className="text-sm text-dark-300 mt-1 whitespace-pre-wrap">{message.content}</p>
                           </div>
                         </div>
                       </div>
@@ -360,17 +422,39 @@ export default function WorkspaceDetail() {
 
                 {/* 입력 */}
                 <div className="pt-4 border-t border-dark-800">
-                  <div className="flex space-x-2">
+                  <div className="flex space-x-2 mb-2">
+                    <select 
+                      className="input w-48"
+                      value={selectedAgentId}
+                      onChange={(e) => setSelectedAgentId(e.target.value)}
+                      disabled={executing}
+                    >
+                      <option value="">에이전트 선택</option>
+                      {agents.filter(a => a.status === 'online').map(agent => (
+                        <option key={agent.id} value={agent.id}>
+                          {agent.name}
+                        </option>
+                      ))}
+                    </select>
                     <input
                       type="text"
-                      placeholder="메시지를 입력하세요..."
+                      placeholder="에이전트에게 요청할 작업을 입력하세요..."
                       className="input flex-1"
-                      disabled
+                      value={userInput}
+                      onChange={(e) => setUserInput(e.target.value)}
+                      onKeyPress={(e) => e.key === 'Enter' && executeAgent()}
+                      disabled={executing}
                     />
-                    <button className="btn btn-primary" disabled>전송</button>
+                    <button 
+                      className="btn btn-primary"
+                      disabled={executing || !userInput.trim() || !selectedAgentId}
+                      onClick={executeAgent}
+                    >
+                      {executing ? '실행 중...' : '실행'}
+                    </button>
                   </div>
-                  <p className="text-xs text-dark-600 mt-2">
-                    💡 관전 모드: 에이전트 간 자율 협업 중입니다. 결과만 확인할 수 있습니다.
+                  <p className="text-xs text-dark-600">
+                    💡 에이전트가 작업을 수행하고 필요시 다른 에이전트와 협업합니다. 결과는 실시간으로 표시됩니다.
                   </p>
                 </div>
               </>
