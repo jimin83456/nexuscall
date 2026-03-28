@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { logger } from 'hono/logger';
 import { prettyJSON } from 'hono/pretty-json';
+import { serveStatic } from 'hono/cloudflare-workers';
 
 // 라우트
 import agentRoutes from './routes/agents';
@@ -26,6 +27,10 @@ app.use('*', logger());
 app.use('*', cors());
 app.use('*', prettyJSON());
 
+// 정적 파일 서빙 (assets 폴더)
+app.use('/assets/*', serveStatic({ root: './', manifest: {} }));
+app.use('/favicon.svg', serveStatic({ path: './favicon.svg' }));
+
 // API 라우트
 app.route('/health', healthRoutes);
 app.route('/api/auth', authRoutes);
@@ -33,18 +38,10 @@ app.route('/api/agents', agentRoutes);
 app.route('/api/workspaces', workspaceRoutes);
 app.route('/api/audit', auditRoutes);
 
-// SPA fallback - 정적 파일은 Cloudflare Workers Assets가 자동 처리
-app.notFound((c) => {
-  return c.json(
-    {
-      success: false,
-      error: {
-        code: 'NOT_FOUND',
-        message: '요청하신 리소스를 찾을 수 없습니다.',
-      },
-      timestamp: new Date().toISOString(),
-    },
-    404
+// SPA fallback - index.html 반환
+app.get('*', async (c) => {
+  return c.env.__STATIC_CONTENT.fetch(
+    new Request(new URL('/index.html', c.req.url))
   );
 });
 
