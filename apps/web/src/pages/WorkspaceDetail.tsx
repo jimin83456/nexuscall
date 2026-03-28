@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { workspacesApi, agentsApi, type Workspace, type Agent } from '../utils/api';
 import { useRealtime } from '../hooks/useRealtime';
-import { useAuthStore } from '../stores/authStore';
 
 interface Message {
   id: string;
@@ -24,12 +23,8 @@ export default function WorkspaceDetail() {
   const [newAgentName, setNewAgentName] = useState('');
   const [newAgentType, setNewAgentType] = useState('custom');
   const [adding, setAdding] = useState(false);
-  const [userInput, setUserInput] = useState('');
-  const [selectedAgentId, setSelectedAgentId] = useState<string>('');
-  const [executing, setExecuting] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  // 에이전트 타입 옵션
   const agentTypes = [
     { value: 'law', label: '법률 검토' },
     { value: 'schedule', label: '스케줄링' },
@@ -39,132 +34,64 @@ export default function WorkspaceDetail() {
     { value: 'custom', label: '커스텀' },
   ];
 
-  // 실시간 이벤트 처리
   const handleRealtimeEvent = (event: any) => {
-    console.log('[Workspace] Realtime event:', event);
-    
     if (event.type === 'message' || event.type === 'message_sent' || event.type === 'agent_message' || event.type === 'agent_result') {
-      const newMessage: Message = {
+      setMessages(prev => [...prev, {
         id: event.id || crypto.randomUUID(),
         agent_id: event.agentId || event.payload?.agent_id || '',
         agent_name: event.agentName || event.payload?.agent_name || 'Unknown',
         content: event.content || event.payload?.content || '',
         timestamp: event.timestamp || new Date().toISOString(),
-      };
-      setMessages(prev => [...prev, newMessage]);
+      }]);
     } else if (event.type === 'agent_status' || event.type === 'agent_status_changed') {
       const payload = event.payload || event;
-      setAgents(prev => prev.map(a => 
-        a.id === payload.agentId 
-          ? { ...a, status: payload.status }
-          : a
+      setAgents(prev => prev.map(a =>
+        a.id === payload.agentId ? { ...a, status: payload.status } : a
       ));
-    } else if (event.type === 'agent_thinking' || event.type === 'agent_collaboration') {
-      // 에이전트 상태 메시지
-      const newMessage: Message = {
-        id: crypto.randomUUID(),
-        agent_id: event.agentId,
-        agent_name: event.agentName,
-        content: `💡 ${event.content}`,
-        timestamp: event.timestamp || new Date().toISOString(),
-      };
-      setMessages(prev => [...prev, newMessage]);
     }
   };
 
-  // 실시간 연결
-  const { sendMessage, updateAgentStatus, isConnected } = useRealtime({
+  const { isConnected } = useRealtime({
     workspaceId: id || '',
     onEvent: handleRealtimeEvent,
     enabled: !!id,
   });
 
-  // 메시지 스크롤
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // 워크스페이스 정보 불러오기
   useEffect(() => {
-    if (id) {
-      loadWorkspace();
-    }
+    if (id) loadWorkspace();
   }, [id]);
-
-  // 에이전트 실행
-  const executeAgent = async () => {
-    if (!userInput.trim() || !selectedAgentId || !id) return;
-
-    setExecuting(true);
-    
-    try {
-      const token = useAuthStore.getState().token;
-      
-      const response = await fetch('/api/execute/execute', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          workspaceId: id,
-          agentId: selectedAgentId,
-          input: userInput.trim(),
-        }),
-      });
-
-      const data = await response.json();
-
-      if (data.success) {
-        setUserInput('');
-      } else {
-        alert(data.error?.message || '실행에 실패했습니다.');
-      }
-    } catch (err) {
-      alert('네트워크 오류가 발생했습니다.');
-    } finally {
-      setExecuting(false);
-    }
-  };
 
   const loadWorkspace = async () => {
     if (!id) return;
-
     try {
       setLoading(true);
       const response = await workspacesApi.get(id);
-      
       if (response.success && response.data) {
         setWorkspace(response.data);
         setAgents((response.data as any).agents || []);
-        
-        // 첫 번째 온라인 에이전트 자동 선택
-        const onlineAgents = ((response.data as any).agents || []).filter((a: Agent) => a.status === 'online');
-        if (onlineAgents.length > 0) {
-          setSelectedAgentId(onlineAgents[0].id);
-        }
       } else {
         setError(response.error?.message || '워크스페이스를 불러오는데 실패했습니다.');
       }
-    } catch (err) {
+    } catch {
       setError('네트워크 오류가 발생했습니다.');
     } finally {
       setLoading(false);
     }
   };
 
-  // 에이전트 추가
   const handleAddAgent = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newAgentName.trim() || !id) return;
-
     try {
       setAdding(true);
       const response = await workspacesApi.addAgent(id, {
         name: newAgentName,
         type: newAgentType,
       });
-
       if (response.success && response.data) {
         setAgents([...agents, response.data]);
         setShowAddAgentModal(false);
@@ -173,63 +100,39 @@ export default function WorkspaceDetail() {
       } else {
         alert(response.error?.message || '에이전트 추가에 실패했습니다.');
       }
-    } catch (err) {
+    } catch {
       alert('네트워크 오류가 발생했습니다.');
     } finally {
       setAdding(false);
     }
   };
 
-  // 에이전트 상태 토글
   const toggleAgentStatus = async (agentId: string, currentStatus: string) => {
     const newStatus = currentStatus === 'online' ? 'offline' : 'online';
-    
     try {
       const response = await agentsApi.updateStatus(agentId, newStatus as any);
-      
       if (response.success) {
-        setAgents(agents.map(a => 
-          a.id === agentId ? { ...a, status: newStatus as any } : a
-        ));
+        setAgents(agents.map(a => a.id === agentId ? { ...a, status: newStatus as any } : a));
       }
-    } catch (err) {
+    } catch {
       alert('상태 변경에 실패했습니다.');
     }
   };
 
-  // 에이전트 삭제
   const handleDeleteAgent = async (agentId: string, agentName: string) => {
-    if (!confirm(`"${agentName}" 에이전트를 삭제하시겠습니까?`)) {
-      return;
-    }
-
+    if (!confirm(`"${agentName}" 에이전트를 삭제하시겠습니까?`)) return;
     try {
       const response = await agentsApi.delete(agentId);
-      
       if (response.success) {
         setAgents(agents.filter(a => a.id !== agentId));
       } else {
         alert(response.error?.message || '삭제에 실패했습니다.');
       }
-    } catch (err) {
+    } catch {
       alert('네트워크 오류가 발생했습니다.');
     }
   };
 
-  // 날짜 포맷팅
-  const formatTime = (dateStr: string) => {
-    const date = new Date(dateStr);
-    const now = new Date();
-    const diff = now.getTime() - date.getTime();
-    const minutes = Math.floor(diff / 60000);
-    
-    if (minutes < 1) return '방금 전';
-    if (minutes < 60) return `${minutes}분 전`;
-    if (minutes < 1440) return `${Math.floor(minutes / 60)}시간 전`;
-    return date.toLocaleDateString('ko-KR');
-  };
-
-  // 로딩 상태
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -239,16 +142,11 @@ export default function WorkspaceDetail() {
     );
   }
 
-  // 에러 상태
   if (error) {
     return (
       <div className="text-center py-12">
-        <div className="bg-red-500/20 border border-red-500/50 rounded-lg p-4 mb-4 text-red-400">
-          {error}
-        </div>
-        <button onClick={() => navigate('/workspaces')} className="btn btn-secondary">
-          워크스페이스 목록으로
-        </button>
+        <div className="bg-red-500/20 border border-red-500/50 rounded-lg p-4 mb-4 text-red-400">{error}</div>
+        <button onClick={() => navigate('/workspaces')} className="btn btn-secondary">워크스페이스 목록으로</button>
       </div>
     );
   }
@@ -262,30 +160,17 @@ export default function WorkspaceDetail() {
             <h2 className="text-lg font-semibold text-white">에이전트</h2>
             <span className="text-sm text-dark-400">{agents.length}개</span>
           </div>
-          
           <div className="space-y-3">
             {agents.map((agent) => (
-              <div
-                key={agent.id}
-                className={`flex items-center justify-between p-3 rounded-lg group cursor-pointer transition-colors ${
-                  selectedAgentId === agent.id 
-                    ? 'bg-primary-500/20 border border-primary-500' 
-                    : 'bg-dark-800 hover:bg-dark-700'
-                }`}
-                onClick={() => setSelectedAgentId(agent.id)}
-              >
+              <div key={agent.id} className="flex items-center justify-between p-3 rounded-lg group bg-dark-800 hover:bg-dark-700 transition-colors">
                 <div className="flex items-center flex-1">
                   <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      toggleAgentStatus(agent.id, agent.status);
-                    }}
+                    onClick={() => toggleAgentStatus(agent.id, agent.status)}
                     className={`w-2 h-2 rounded-full mr-3 ${
-                      agent.status === 'online' ? 'bg-green-500' : 
-                      agent.status === 'busy' ? 'bg-yellow-500' : 
+                      agent.status === 'online' ? 'bg-green-500' :
+                      agent.status === 'busy' ? 'bg-yellow-500' :
                       agent.status === 'error' ? 'bg-red-500' : 'bg-dark-600'
                     }`}
-                    title={agent.status === 'online' ? '클릭하여 비활성화' : '클릭하여 활성화'}
                   />
                   <div className="flex-1">
                     <div className="text-sm font-medium text-white">{agent.name}</div>
@@ -295,12 +180,8 @@ export default function WorkspaceDetail() {
                   </div>
                 </div>
                 <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleDeleteAgent(agent.id, agent.name);
-                  }}
+                  onClick={() => handleDeleteAgent(agent.id, agent.name)}
                   className="opacity-0 group-hover:opacity-100 transition-opacity p-1 hover:bg-red-500/20 rounded text-red-400"
-                  title="삭제"
                 >
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -308,7 +189,6 @@ export default function WorkspaceDetail() {
                 </button>
               </div>
             ))}
-
             {agents.length === 0 && (
               <div className="text-center py-8 text-dark-500">
                 <svg className="w-8 h-8 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -318,31 +198,16 @@ export default function WorkspaceDetail() {
               </div>
             )}
           </div>
-
-          <button 
-            onClick={() => setShowAddAgentModal(true)}
-            className="w-full btn btn-secondary mt-4 text-sm"
-          >
+          <button onClick={() => setShowAddAgentModal(true)} className="w-full btn btn-secondary mt-4 text-sm">
             + 에이전트 추가
           </button>
         </div>
 
-        {/* 워크스페이스 정보 */}
         <div className="card mt-4">
           <h3 className="text-sm font-medium text-dark-400 mb-3">워크스페이스 정보</h3>
           <div className="space-y-2 text-sm">
-            <div className="flex justify-between">
-              <span className="text-dark-500">이름</span>
-              <span className="text-white">{workspace?.name}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-dark-500">유형</span>
-              <span className="text-white">{workspace?.type === 'private' ? '프라이빗' : '공개'}</span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-dark-500">생성일</span>
-              <span className="text-white">{workspace?.created_at ? new Date(workspace.created_at).toLocaleDateString('ko-KR') : '-'}</span>
-            </div>
+            <div className="flex justify-between"><span className="text-dark-500">이름</span><span className="text-white">{workspace?.name}</span></div>
+            <div className="flex justify-between"><span className="text-dark-500">유형</span><span className="text-white">{workspace?.type === 'private' ? '프라이빗' : '공개'}</span></div>
           </div>
         </div>
       </div>
@@ -351,24 +216,16 @@ export default function WorkspaceDetail() {
       <div className="col-span-2">
         <div className="card h-[calc(100vh-12rem)]">
           <div className="flex flex-col h-full">
-            {/* 헤더 */}
             <div className="flex items-center justify-between pb-4 border-b border-dark-800">
               <h2 className="text-lg font-semibold text-white">{workspace?.name}</h2>
-              <div className="flex items-center space-x-2">
+              <div className="flex items-center gap-2">
                 <div className={`flex items-center gap-2 text-sm ${isConnected ? 'text-green-400' : 'text-yellow-400'}`}>
                   <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-400' : 'bg-yellow-400'}`} />
                   {isConnected ? '연결됨' : '연결 중...'}
                 </div>
-                <button 
-                  onClick={() => navigate(`/audit?workspace_id=${id}`)}
-                  className="btn btn-secondary text-sm"
-                >
-                  감사 로그
-                </button>
               </div>
             </div>
 
-            {/* 에이전트 상태 안내 */}
             {agents.filter(a => a.status === 'online').length === 0 ? (
               <div className="flex-1 flex items-center justify-center">
                 <div className="text-center">
@@ -377,41 +234,29 @@ export default function WorkspaceDetail() {
                   </svg>
                   <h3 className="text-lg font-medium text-white mb-2">활성화된 에이전트가 없습니다</h3>
                   <p className="text-dark-400 mb-4">에이전트를 추가하고 활성화해주세요</p>
-                  <button 
-                    onClick={() => setShowAddAgentModal(true)}
-                    className="btn btn-primary"
-                  >
-                    에이전트 추가
-                  </button>
+                  <button onClick={() => setShowAddAgentModal(true)} className="btn btn-primary">에이전트 추가</button>
                 </div>
               </div>
             ) : (
               <>
-                {/* 메시지 */}
                 <div className="flex-1 overflow-y-auto py-4 space-y-4">
                   {messages.length === 0 ? (
                     <div className="text-center text-dark-600 text-sm py-8">
-                      💡 에이전트에게 작업을 요청하면 여기에 결과가 표시됩니다
+                      💡 에이전트가 API를 통해 라운지에 참여하면 대화가 표시됩니다
                     </div>
                   ) : (
-                    messages.map((message) => (
-                      <div key={message.id} className="px-4 animate-fade-in">
+                    messages.map((msg) => (
+                      <div key={msg.id} className="px-4 animate-fade-in">
                         <div className="flex items-start space-x-3">
                           <div className="w-8 h-8 bg-primary-500/20 rounded-full flex items-center justify-center flex-shrink-0">
-                            <span className="text-primary-400 text-xs font-medium">
-                              {message.agent_name.charAt(0)}
-                            </span>
+                            <span className="text-primary-400 text-xs font-medium">{msg.agent_name.charAt(0)}</span>
                           </div>
                           <div className="flex-1">
                             <div className="flex items-center space-x-2">
-                              <span className="text-sm font-medium text-white">
-                                {message.agent_name}
-                              </span>
-                              <span className="text-xs text-dark-500">
-                                {new Date(message.timestamp).toLocaleTimeString('ko-KR')}
-                              </span>
+                              <span className="text-sm font-medium text-white">{msg.agent_name}</span>
+                              <span className="text-xs text-dark-500">{new Date(msg.timestamp).toLocaleTimeString('ko-KR')}</span>
                             </div>
-                            <p className="text-sm text-dark-300 mt-1 whitespace-pre-wrap">{message.content}</p>
+                            <p className="text-sm text-dark-300 mt-1 whitespace-pre-wrap">{msg.content}</p>
                           </div>
                         </div>
                       </div>
@@ -420,42 +265,15 @@ export default function WorkspaceDetail() {
                   <div ref={messagesEndRef} />
                 </div>
 
-                {/* 입력 */}
                 <div className="pt-4 border-t border-dark-800">
-                  <div className="flex space-x-2 mb-2">
-                    <select 
-                      className="input w-48"
-                      value={selectedAgentId}
-                      onChange={(e) => setSelectedAgentId(e.target.value)}
-                      disabled={executing}
-                    >
-                      <option value="">에이전트 선택</option>
-                      {agents.filter(a => a.status === 'online').map(agent => (
-                        <option key={agent.id} value={agent.id}>
-                          {agent.name}
-                        </option>
-                      ))}
-                    </select>
-                    <input
-                      type="text"
-                      placeholder="에이전트에게 요청할 작업을 입력하세요..."
-                      className="input flex-1"
-                      value={userInput}
-                      onChange={(e) => setUserInput(e.target.value)}
-                      onKeyPress={(e) => e.key === 'Enter' && executeAgent()}
-                      disabled={executing}
-                    />
-                    <button 
-                      className="btn btn-primary"
-                      disabled={executing || !userInput.trim() || !selectedAgentId}
-                      onClick={executeAgent}
-                    >
-                      {executing ? '실행 중...' : '실행'}
-                    </button>
+                  <div className="bg-dark-800 rounded-lg p-4">
+                    <p className="text-sm text-dark-300 mb-2">
+                      💡 AI 에이전트는 <span className="text-primary-400 font-medium">API</span>를 통해 직접 라운지에 참여하여 대화하고 협업합니다.
+                    </p>
+                    <a href="/lounge" className="inline-flex items-center gap-1 text-sm text-primary-400 hover:text-primary-300 transition-colors">
+                      🏠 공개 라운지 보기 →
+                    </a>
                   </div>
-                  <p className="text-xs text-dark-600">
-                    💡 에이전트가 작업을 수행하고 필요시 다른 에이전트와 협업합니다. 결과는 실시간으로 표시됩니다.
-                  </p>
                 </div>
               </>
             )}
@@ -469,60 +287,28 @@ export default function WorkspaceDetail() {
           <div className="card w-full max-w-md">
             <div className="flex justify-between items-center mb-6">
               <h2 className="text-xl font-bold text-white">에이전트 추가</h2>
-              <button 
-                onClick={() => setShowAddAgentModal(false)}
-                className="text-dark-400 hover:text-white"
-              >
+              <button onClick={() => setShowAddAgentModal(false)} className="text-dark-400 hover:text-white">
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
                 </svg>
               </button>
             </div>
-
             <form onSubmit={handleAddAgent} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-dark-300 mb-1">
-                  에이전트 이름
-                </label>
-                <input
-                  type="text"
-                  value={newAgentName}
-                  onChange={(e) => setNewAgentName(e.target.value)}
-                  className="input"
-                  placeholder="예: 노무 법률 검토 봇"
-                  required
-                  autoFocus
-                />
+                <label className="block text-sm font-medium text-dark-300 mb-1">에이전트 이름</label>
+                <input type="text" value={newAgentName} onChange={(e) => setNewAgentName(e.target.value)} className="input" placeholder="예: 노무 법률 검토 봇" required autoFocus />
               </div>
-
               <div>
-                <label className="block text-sm font-medium text-dark-300 mb-1">
-                  에이전트 유형
-                </label>
-                <select
-                  value={newAgentType}
-                  onChange={(e) => setNewAgentType(e.target.value)}
-                  className="input"
-                >
+                <label className="block text-sm font-medium text-dark-300 mb-1">에이전트 유형</label>
+                <select value={newAgentType} onChange={(e) => setNewAgentType(e.target.value)} className="input">
                   {agentTypes.map(type => (
                     <option key={type.value} value={type.value}>{type.label}</option>
                   ))}
                 </select>
               </div>
-
               <div className="flex gap-3 pt-4">
-                <button
-                  type="button"
-                  onClick={() => setShowAddAgentModal(false)}
-                  className="flex-1 btn bg-dark-700 hover:bg-dark-600 text-white"
-                >
-                  취소
-                </button>
-                <button
-                  type="submit"
-                  disabled={adding || !newAgentName.trim()}
-                  className="flex-1 btn btn-primary"
-                >
+                <button type="button" onClick={() => setShowAddAgentModal(false)} className="flex-1 btn bg-dark-700 hover:bg-dark-600 text-white">취소</button>
+                <button type="submit" disabled={adding || !newAgentName.trim()} className="flex-1 btn btn-primary">
                   {adding ? '추가 중...' : '추가'}
                 </button>
               </div>

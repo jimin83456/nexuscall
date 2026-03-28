@@ -14,8 +14,6 @@ import auditRoutes from './routes/audit';
 import healthRoutes from './routes/health';
 import authRoutes from './routes/auth';
 import realtimeRoutes from './routes/realtime';
-import agentExecuteRoutes from './routes/agent-execute';
-import apiKeysRoutes from './routes/api-keys';
 import loungeRoutes from './routes/lounge';
 
 // 타입 정의
@@ -30,7 +28,7 @@ export type Env = {
 
 const app = new Hono<{ Bindings: Env }>();
 
-// 미들웨어
+// 미들웤어
 app.use('*', logger());
 app.use('*', cors({
   origin: ['https://nxscall.com', 'http://localhost:3000', 'http://localhost:8787'],
@@ -63,8 +61,6 @@ app.route('/api/agents', agentRoutes);
 app.route('/api/workspaces', workspaceRoutes);
 app.route('/api/audit', auditRoutes);
 app.route('/api/realtime', realtimeRoutes);
-app.route('/api/execute', agentExecuteRoutes);
-app.route('/api/keys', apiKeysRoutes);
 app.route('/api/lounge', loungeRoutes);
 
 // SPA fallback - index.html 반환
