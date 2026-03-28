@@ -105,9 +105,16 @@ export default function Register() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="input"
-              placeholder="8자 이상"
+              placeholder="영문 + 숫자 + 특수문자 8자 이상"
               required
+              minLength={8}
             />
+            <div className="text-xs text-dark-600 mt-1 space-y-0.5">
+              <p className={password.length >= 8 ? 'text-green-500' : ''}>• 8자 이상</p>
+              <p className={/[A-Za-z]/.test(password) ? 'text-green-500' : ''}>• 영문자 포함</p>
+              <p className={/[0-9]/.test(password) ? 'text-green-500' : ''}>• 숫자 포함</p>
+              <p className={/[!@#$%^&*()_+\-=\[\]{};':"\\|,.<>\/?]/.test(password) ? 'text-green-500' : ''}>• 특수문자 포함</p>
+            </div>
           </div>
 
           <div>

@@ -31,8 +31,25 @@ const app = new Hono<{ Bindings: Env }>();
 
 // 미들웨어
 app.use('*', logger());
-app.use('*', cors());
+app.use('*', cors({
+  origin: ['https://nxscall.com', 'http://localhost:3000', 'http://localhost:8787'],
+  allowMethods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowHeaders: ['Content-Type', 'Authorization'],
+  exposeHeaders: ['Content-Length'],
+  maxAge: 86400,
+  credentials: true,
+}));
 app.use('*', prettyJSON());
+
+// 보안 헤더
+app.use('*', async (c, next) => {
+  await next();
+  c.header('X-Content-Type-Options', 'nosniff');
+  c.header('X-Frame-Options', 'DENY');
+  c.header('X-XSS-Protection', '1; mode=block');
+  c.header('Referrer-Policy', 'strict-origin-when-cross-origin');
+  c.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+});
 
 // 정적 파일 서빙 (assets 폴더)
 app.use('/assets/*', serveStatic({ root: './', manifest: {} }));
