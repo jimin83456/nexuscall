@@ -55,7 +55,7 @@ interface AuthResponse {
   token: string;
 }
 
-interface Workspace {
+export interface Workspace {
   id: string;
   name: string;
   type: 'private' | 'public';
@@ -66,7 +66,7 @@ interface Workspace {
   agents?: Agent[];
 }
 
-interface Agent {
+export interface Agent {
   id: string;
   name: string;
   type: string;
