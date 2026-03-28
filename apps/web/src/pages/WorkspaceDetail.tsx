@@ -1,18 +1,29 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { workspacesApi, agentsApi, type Workspace, type Agent } from '../utils/api';
+import { useRealtime } from '../hooks/useRealtime';
+
+interface Message {
+  id: string;
+  agent_id: string;
+  agent_name: string;
+  content: string;
+  timestamp: string;
+}
 
 export default function WorkspaceDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [workspace, setWorkspace] = useState<Workspace | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [showAddAgentModal, setShowAddAgentModal] = useState(false);
   const [newAgentName, setNewAgentName] = useState('');
   const [newAgentType, setNewAgentType] = useState('custom');
   const [adding, setAdding] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // 에이전트 타입 옵션
   const agentTypes = [
@@ -23,6 +34,41 @@ export default function WorkspaceDetail() {
     { value: 'onboarding', label: '온보딩' },
     { value: 'custom', label: '커스텀' },
   ];
+
+  // 실시간 이벤트 처리
+  const handleRealtimeEvent = (event: any) => {
+    console.log('[Workspace] Realtime event:', event);
+    
+    if (event.type === 'message' || event.type === 'message_sent') {
+      const agent = agents.find(a => a.id === event.payload.agent_id);
+      const newMessage: Message = {
+        id: event.id,
+        agent_id: event.payload.agent_id,
+        agent_name: agent?.name || 'Unknown',
+        content: event.payload.content || event.payload.details,
+        timestamp: event.timestamp,
+      };
+      setMessages(prev => [...prev, newMessage]);
+    } else if (event.type === 'agent_status_changed') {
+      setAgents(prev => prev.map(a => 
+        a.id === event.payload.agent_id 
+          ? { ...a, status: event.payload.status }
+          : a
+      ));
+    }
+  };
+
+  // 실시간 연결
+  const { broadcast, isConnected } = useRealtime({
+    workspaceId: id || '',
+    onEvent: handleRealtimeEvent,
+    enabled: !!id,
+  });
+
+  // 메시지 스크롤
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   // 워크스페이스 정보 불러오기
   useEffect(() => {
@@ -271,11 +317,45 @@ export default function WorkspaceDetail() {
               </div>
             ) : (
               <>
-                {/* 메시지 (더미) */}
+                {/* 연결 상태 표시 */}
+                <div className="flex items-center gap-2 px-4 py-2 bg-dark-800/50 text-xs">
+                  <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-yellow-500'}`} />
+                  <span className="text-dark-400">
+                    {isConnected ? '실시간 연결됨' : '연결 중...'}
+                  </span>
+                </div>
+
+                {/* 메시지 */}
                 <div className="flex-1 overflow-y-auto py-4 space-y-4">
-                  <div className="text-center text-dark-600 text-sm py-8">
-                    💡 에이전트 간 자율 협업 대화가 여기에 표시됩니다
-                  </div>
+                  {messages.length === 0 ? (
+                    <div className="text-center text-dark-600 text-sm py-8">
+                      💡 에이전트 간 자율 협업 대화가 여기에 표시됩니다
+                    </div>
+                  ) : (
+                    messages.map((message) => (
+                      <div key={message.id} className="px-4 animate-fade-in">
+                        <div className="flex items-start space-x-3">
+                          <div className="w-8 h-8 bg-primary-500/20 rounded-full flex items-center justify-center flex-shrink-0">
+                            <span className="text-primary-400 text-xs font-medium">
+                              {message.agent_name.charAt(0)}
+                            </span>
+                          </div>
+                          <div className="flex-1">
+                            <div className="flex items-center space-x-2">
+                              <span className="text-sm font-medium text-white">
+                                {message.agent_name}
+                              </span>
+                              <span className="text-xs text-dark-500">
+                                {new Date(message.timestamp).toLocaleTimeString('ko-KR')}
+                              </span>
+                            </div>
+                            <p className="text-sm text-dark-300 mt-1">{message.content}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))
+                  )}
+                  <div ref={messagesEndRef} />
                 </div>
 
                 {/* 입력 */}

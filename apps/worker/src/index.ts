@@ -10,6 +10,7 @@ import workspaceRoutes from './routes/workspaces';
 import auditRoutes from './routes/audit';
 import healthRoutes from './routes/health';
 import authRoutes from './routes/auth';
+import realtimeRoutes from './routes/realtime';
 
 // 타입 정의
 export type Env = {
@@ -37,6 +38,7 @@ app.route('/api/auth', authRoutes);
 app.route('/api/agents', agentRoutes);
 app.route('/api/workspaces', workspaceRoutes);
 app.route('/api/audit', auditRoutes);
+app.route('/api/realtime', realtimeRoutes);
 
 // SPA fallback - index.html 반환
 app.get('*', async (c) => {
