@@ -1,13 +1,16 @@
 import { Hono } from 'hono';
 import type { Env } from '../index';
+import { authMiddleware } from '../middleware/auth';
 
 const app = new Hono<{ Bindings: Env }>();
 
-// 모든 워크스페이스 조회
-app.get('/', async (c) => {
+// 모든 워크스페이스 조회 (인증 필요)
+app.get('/', authMiddleware, async (c) => {
+  const user = c.get('user') as { id: string };
+  
   const { results } = await c.env.DB.prepare(
-    'SELECT * FROM workspaces ORDER BY created_at DESC'
-  ).all();
+    'SELECT * FROM workspaces WHERE owner_id = ? ORDER BY created_at DESC'
+  ).bind(user.id).all();
   
   return c.json({
     success: true,
@@ -19,16 +22,17 @@ app.get('/', async (c) => {
   });
 });
 
-// 워크스페이스 생성
-app.post('/', async (c) => {
+// 워크스페이스 생성 (인증 필요)
+app.post('/', authMiddleware, async (c) => {
+  const user = c.get('user') as { id: string };
   const body = await c.req.json();
-  const { name, type, owner_id, settings } = body;
+  const { name, type, settings } = body;
   
   const id = crypto.randomUUID();
   
   await c.env.DB.prepare(
     'INSERT INTO workspaces (id, name, type, owner_id, settings) VALUES (?, ?, ?, ?, ?)'
-  ).bind(id, name, type || 'private', owner_id, JSON.stringify(settings || {})).run();
+  ).bind(id, name, type || 'private', user.id, JSON.stringify(settings || {})).run();
   
   return c.json({
     success: true,
@@ -36,19 +40,20 @@ app.post('/', async (c) => {
       id,
       name,
       type: type || 'private',
-      owner_id,
+      owner_id: user.id,
     },
     timestamp: new Date().toISOString(),
   });
 });
 
-// 워크스페이스 상세
-app.get('/:id', async (c) => {
+// 워크스페이스 상세 (인증 필요)
+app.get('/:id', authMiddleware, async (c) => {
+  const user = c.get('user') as { id: string };
   const id = c.req.param('id');
   
   const workspace = await c.env.DB.prepare(
-    'SELECT * FROM workspaces WHERE id = ?'
-  ).bind(id).first();
+    'SELECT * FROM workspaces WHERE id = ? AND owner_id = ?'
+  ).bind(id, user.id).first();
   
   if (!workspace) {
     return c.json({
@@ -76,9 +81,27 @@ app.get('/:id', async (c) => {
   });
 });
 
-// 워크스페이스에 에이전트 추가
-app.post('/:id/agents', async (c) => {
+// 워크스페이스에 에이전트 추가 (인증 필요)
+app.post('/:id/agents', authMiddleware, async (c) => {
+  const user = c.get('user') as { id: string };
   const workspaceId = c.req.param('id');
+  
+  // 워크스페이스 소유자 확인
+  const workspace = await c.env.DB.prepare(
+    'SELECT id FROM workspaces WHERE id = ? AND owner_id = ?'
+  ).bind(workspaceId, user.id).first();
+  
+  if (!workspace) {
+    return c.json({
+      success: false,
+      error: {
+        code: 'FORBIDDEN',
+        message: '이 워크스페이스에 접근할 권한이 없습니다.',
+      },
+      timestamp: new Date().toISOString(),
+    }, 403);
+  }
+  
   const body = await c.req.json();
   const { name, type, config } = body;
   
@@ -101,13 +124,14 @@ app.post('/:id/agents', async (c) => {
   });
 });
 
-// 워크스페이스 삭제
-app.delete('/:id', async (c) => {
+// 워크스페이스 삭제 (인증 필요)
+app.delete('/:id', authMiddleware, async (c) => {
+  const user = c.get('user') as { id: string };
   const id = c.req.param('id');
   
-  await c.env.DB.prepare(
-    'DELETE FROM workspaces WHERE id = ?'
-  ).bind(id).run();
+  const result = await c.env.DB.prepare(
+    'DELETE FROM workspaces WHERE id = ? AND owner_id = ?'
+  ).bind(id, user.id).run();
   
   return c.json({
     success: true,
