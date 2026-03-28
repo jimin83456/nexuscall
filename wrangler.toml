@@ -5,6 +5,7 @@ compatibility_flags = ["nodejs_compat"]
 
 [vars]
 ENVIRONMENT = "production"
+JWT_SECRET = "nexuscall-jwt-secret-change-in-production-2026"
 
 [[d1_databases]]
 binding = "DB"

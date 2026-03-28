@@ -8,6 +8,7 @@ import agentRoutes from './routes/agents';
 import workspaceRoutes from './routes/workspaces';
 import auditRoutes from './routes/audit';
 import healthRoutes from './routes/health';
+import authRoutes from './routes/auth';
 
 // 타입 정의
 export type Env = {
@@ -15,6 +16,7 @@ export type Env = {
   CACHE: KVNamespace;
   __STATIC_CONTENT: Fetcher;
   ENVIRONMENT: string;
+  JWT_SECRET?: string;
 };
 
 const app = new Hono<{ Bindings: Env }>();
@@ -26,6 +28,7 @@ app.use('*', prettyJSON());
 
 // API 라우트
 app.route('/health', healthRoutes);
+app.route('/api/auth', authRoutes);
 app.route('/api/agents', agentRoutes);
 app.route('/api/workspaces', workspaceRoutes);
 app.route('/api/audit', auditRoutes);
