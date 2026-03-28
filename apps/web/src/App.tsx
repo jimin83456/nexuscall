@@ -8,6 +8,7 @@ import AuditLogs from './pages/AuditLogs';
 import Pricing from './pages/Pricing';
 import Login from './pages/Login';
 import Register from './pages/Register';
+import Settings from './pages/Settings';
 import { useAuth } from './hooks/useAuth';
 
 // 보호된 라우트 컴포넌트
@@ -67,6 +68,16 @@ function App() {
           <ProtectedRoute>
             <Layout>
               <AuditLogs />
+            </Layout>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/settings"
+        element={
+          <ProtectedRoute>
+            <Layout>
+              <Settings />
             </Layout>
           </ProtectedRoute>
         }

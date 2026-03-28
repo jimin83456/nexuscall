@@ -2,6 +2,7 @@ import { Hono } from 'hono';
 import type { Env } from '../index';
 import { verifyJWT } from '../utils/auth';
 import { executeCollaboration, type AgentTask } from '../ai/engine';
+import { getUserApiKey } from './api-keys';
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -12,10 +13,7 @@ app.post('/execute', async (c) => {
   if (!token) {
     return c.json({
       success: false,
-      error: {
-        code: 'UNAUTHORIZED',
-        message: '토큰이 필요합니다.',
-      },
+      error: { code: 'UNAUTHORIZED', message: '토큰이 필요합니다.' },
       timestamp: new Date().toISOString(),
     }, 401);
   }
@@ -26,10 +24,7 @@ app.post('/execute', async (c) => {
     if (!result.valid || !result.payload) {
       return c.json({
         success: false,
-        error: {
-          code: 'UNAUTHORIZED',
-          message: '유효하지 않은 토큰입니다.',
-        },
+        error: { code: 'UNAUTHORIZED', message: '유효하지 않은 토큰입니다.' },
         timestamp: new Date().toISOString(),
       }, 401);
     }
@@ -46,10 +41,7 @@ app.post('/execute', async (c) => {
     if (!workspace) {
       return c.json({
         success: false,
-        error: {
-          code: 'FORBIDDEN',
-          message: '이 워크스페이스에 접근할 권한이 없습니다.',
-        },
+        error: { code: 'FORBIDDEN', message: '이 워크스페이스에 접근할 권한이 없습니다.' },
         timestamp: new Date().toISOString(),
       }, 403);
     }
@@ -62,12 +54,27 @@ app.post('/execute', async (c) => {
     if (!agent) {
       return c.json({
         success: false,
-        error: {
-          code: 'NOT_FOUND',
-          message: '에이전트를 찾을 수 없습니다.',
-        },
+        error: { code: 'NOT_FOUND', message: '에이전트를 찾을 수 없습니다.' },
         timestamp: new Date().toISOString(),
       }, 404);
+    }
+
+    // BYOK: 사용자의 API 키 조회
+    const masterSecret = c.env.ENCRYPTION_SECRET || c.env.JWT_SECRET || 'default-secret-change-me';
+    
+    // 사용자가 설정한 provider 확인 (기본: openai)
+    const provider = (c.env as any).AI_PROVIDER || 'openai';
+    const userApiKey = await getUserApiKey(c.env.DB, userId, provider, masterSecret);
+
+    if (!userApiKey) {
+      return c.json({
+        success: false,
+        error: {
+          code: 'API_KEY_NOT_FOUND',
+          message: `${provider.toUpperCase()} API 키가 등록되지 않았습니다. 설정에서 API 키를 등록해주세요.`,
+        },
+        timestamp: new Date().toISOString(),
+      }, 400);
     }
 
     // 같은 워크스페이스의 다른 에이전트들 조회
@@ -88,23 +95,7 @@ app.post('/execute', async (c) => {
       createdAt: new Date(),
     };
 
-    // AI Provider 설정
-    const provider = (c.env as any).AI_PROVIDER || 'openai';
-    const apiKey = (c.env as any)[`${provider.toUpperCase()}_API_KEY`];
-    const model = (c.env as any).AI_MODEL || undefined;
-
-    if (!apiKey) {
-      return c.json({
-        success: false,
-        error: {
-          code: 'AI_NOT_CONFIGURED',
-          message: 'AI API 키가 설정되지 않았습니다.',
-        },
-        timestamp: new Date().toISOString(),
-      }, 500);
-    }
-
-    // Durable Object에 브로드캐스트 함수
+    // Durable Object에 브로드캐스트
     const broadcastMessage = async (message: any) => {
       try {
         const roomId = c.env.WORKSPACE_ROOM.idFromName(workspaceId);
@@ -119,33 +110,29 @@ app.post('/execute', async (c) => {
       }
     };
 
-    // 에이전트 상태를 busy로 변경
+    // 에이전트 상태 busy로 변경
     await c.env.DB.prepare(
       'UPDATE agents SET status = ? WHERE id = ?'
     ).bind('busy', agentId).run();
 
     await broadcastMessage({
       type: 'agent_status',
-      payload: {
-        agentId,
-        status: 'busy',
-        timestamp: new Date().toISOString(),
-      },
+      payload: { agentId, status: 'busy', timestamp: new Date().toISOString() },
     });
 
     // 비동기로 작업 실행
     (async () => {
       try {
-        const result = await executeCollaboration(task, {
+        const aiResult = await executeCollaboration(task, {
           provider: provider as any,
-          apiKey,
-          model,
+          apiKey: userApiKey,
+          model: (c.env as any).AI_MODEL || undefined,
           otherAgents: otherAgents || [],
-          workspaceName: workspace.name,
+          workspaceName: workspace.name as string,
           broadcastMessage,
         });
 
-        // 결과 저장 (audit_logs)
+        // 감사 로그 저장
         await c.env.DB.prepare(
           'INSERT INTO audit_logs (id, workspace_id, agent_id, action, details) VALUES (?, ?, ?, ?, ?)'
         ).bind(
@@ -153,7 +140,7 @@ app.post('/execute', async (c) => {
           workspaceId,
           agentId,
           'decision_made',
-          JSON.stringify({ input, result })
+          JSON.stringify({ input, result: aiResult })
         ).run();
 
         // 결과 브로드캐스트
@@ -161,7 +148,7 @@ app.post('/execute', async (c) => {
           type: 'agent_result',
           agentId,
           agentName: agent.name,
-          content: result,
+          content: aiResult,
           timestamp: new Date().toISOString(),
         });
 
@@ -175,18 +162,13 @@ app.post('/execute', async (c) => {
           timestamp: new Date().toISOString(),
         });
       } finally {
-        // 에이전트 상태를 online으로 복구
         await c.env.DB.prepare(
           'UPDATE agents SET status = ? WHERE id = ?'
         ).bind('online', agentId).run();
 
         await broadcastMessage({
           type: 'agent_status',
-          payload: {
-            agentId,
-            status: 'online',
-            timestamp: new Date().toISOString(),
-          },
+          payload: { agentId, status: 'online', timestamp: new Date().toISOString() },
         });
       }
     })();
@@ -196,6 +178,7 @@ app.post('/execute', async (c) => {
       data: {
         taskId: task.id,
         status: 'running',
+        provider,
         message: '작업이 시작되었습니다. WebSocket으로 결과를 수신하세요.',
       },
       timestamp: new Date().toISOString(),
@@ -204,25 +187,10 @@ app.post('/execute', async (c) => {
   } catch (err) {
     return c.json({
       success: false,
-      error: {
-        code: 'INTERNAL_ERROR',
-        message: String(err),
-      },
+      error: { code: 'INTERNAL_ERROR', message: String(err) },
       timestamp: new Date().toISOString(),
     }, 500);
   }
-});
-
-// 작업 상태 조회
-app.get('/status/:taskId', async (c) => {
-  // TODO: 작업 상태 조회 로직
-  return c.json({
-    success: true,
-    data: {
-      status: 'completed',
-    },
-    timestamp: new Date().toISOString(),
-  });
 });
 
 export default app;
