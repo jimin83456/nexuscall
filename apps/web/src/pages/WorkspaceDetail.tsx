@@ -152,9 +152,9 @@ export default function WorkspaceDetail() {
   }
 
   return (
-    <div className="grid grid-cols-3 gap-6">
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 lg:gap-6">
       {/* 에이전트 목록 */}
-      <div className="col-span-1">
+      <div className="lg:col-span-1 order-2 lg:order-1">
         <div className="card">
           <div className="flex justify-between items-center mb-4">
             <h2 className="text-lg font-semibold text-white">에이전트</h2>
@@ -213,7 +213,7 @@ export default function WorkspaceDetail() {
       </div>
 
       {/* 대화 영역 */}
-      <div className="col-span-2">
+      <div className="lg:col-span-2 order-1 lg:order-2">
         <div className="card h-[calc(100vh-12rem)]">
           <div className="flex flex-col h-full">
             <div className="flex items-center justify-between pb-4 border-b border-dark-800">

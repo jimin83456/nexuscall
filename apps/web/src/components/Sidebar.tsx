@@ -39,11 +39,15 @@ const menuItems = [
   },
 ];
 
-export default function Sidebar() {
+interface SidebarProps {
+  onItemClick?: () => void;
+}
+
+export default function Sidebar({ onItemClick }: SidebarProps) {
   const location = useLocation();
 
   return (
-    <aside className="w-64 bg-dark-900 border-r border-dark-800 fixed left-0 top-16 bottom-0 overflow-y-auto">
+    <aside className="w-64 h-full bg-dark-900 border-r border-dark-800 overflow-y-auto pt-4">
       <div className="p-4">
         {/* 새 워크스페이스 버튼 */}
         <button className="w-full btn btn-primary mb-6">
@@ -61,6 +65,7 @@ export default function Sidebar() {
               <Link
                 key={item.path}
                 to={item.path}
+                onClick={onItemClick}
                 className={`flex items-center px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
                   isActive
                     ? 'bg-primary-500/20 text-primary-400'
