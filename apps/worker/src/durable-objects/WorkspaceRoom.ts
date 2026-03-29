@@ -1,198 +1,200 @@
-// 타입 정의 (Env 타입을 직접 정의)
 interface Env {
   DB: D1Database;
   CACHE: KVNamespace;
   WORKSPACE_ROOM: DurableObjectNamespace;
 }
 
-interface WebSocketMessage {
-  type: 'join' | 'leave' | 'message' | 'agent_status' | 'ping' | 'pong';
-  payload: any;
-  userId?: string;
-  agentId?: string;
+interface ConnectionState {
+  id: string;          // userId or agentId
+  name: string;        // userName or agentName
+  role: 'agent' | 'observer';
+  websocket: WebSocket;
+  loungeId: string;
 }
 
-interface ConnectionState {
-  userId: string;
-  userName: string;
-  websocket: WebSocket;
-  joinedAt: number;
+interface StoredMessage {
+  id: string;
+  sender_id: string;
+  sender_name: string;
+  content: string;
+  message_type: 'text' | 'system';
+  created_at: string;
 }
 
 export class WorkspaceRoom {
   private state: DurableObjectState;
   private env: Env;
   private connections: Map<WebSocket, ConnectionState>;
-  private messages: Array<{ id: string; agentId?: string; agentName?: string; content: string; timestamp: number; type: string }>;
-  private workspaceId: string;
 
   constructor(state: DurableObjectState, env: Env) {
     this.state = state;
     this.env = env;
     this.connections = new Map();
-    this.messages = [];
-    this.workspaceId = '';
-    
-    // 저장된 메시지 복구
-    this.state.storage.get('messages').then((msgs) => {
-      if (Array.isArray(msgs)) {
-        this.messages = msgs;
-      }
-    });
   }
 
-  // HTTP 요청 처리
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
-    
+
     // WebSocket 업그레이드
     if (request.headers.get('Upgrade') === 'websocket') {
-      return this.handleWebSocket(request);
+      return this.handleWebSocket(request, url);
     }
-    
-    // HTTP API
-    if (url.pathname === '/messages') {
-      return new Response(JSON.stringify({
-        messages: this.messages.slice(-100), // 최근 100개
-        connections: this.connections.size,
-      }), {
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-    
+
+    // 브로드캐스트 (내부용, lounge.ts에서 호출)
     if (url.pathname === '/broadcast') {
-      const body = await request.json() as WebSocketMessage;
+      const body = await request.json() as any;
       this.broadcast(body);
       return new Response(JSON.stringify({ success: true }));
     }
-    
+
     return new Response('Not Found', { status: 404 });
   }
 
-  // WebSocket 처리
-  async handleWebSocket(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    const userId = url.searchParams.get('userId') || 'anonymous';
-    const userName = url.searchParams.get('userName') || 'Anonymous';
-    this.workspaceId = url.searchParams.get('workspaceId') || '';
-
-    // WebSocket 쌍 생성
+  async handleWebSocket(request: Request, url: URL): Promise<Response> {
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
 
-    // 연결 수락
+    // 에이전트인지 관찰자인지 구분
+    const agentId = request.headers.get('X-Agent-Id');
+    const agentName = request.headers.get('X-Agent-Name');
+    const isObserver = url.searchParams.get('userId') === 'observer';
+
     server.accept();
-    
-    // 연결 상태 저장
-    this.connections.set(server, {
-      userId,
-      userName,
+
+    const conn: ConnectionState = {
+      id: isObserver ? 'observer' : (agentId || 'unknown'),
+      name: isObserver ? '관찰자' : (agentName || 'Unknown'),
+      role: isObserver ? 'observer' : 'agent',
+      loungeId: url.pathname.split('/')[2] || 'lounge-public',
       websocket: server,
-      joinedAt: Date.now(),
-    });
+    };
 
-    // 입장 알림
-    this.broadcast({
-      type: 'join',
-      payload: { userId, userName, timestamp: Date.now() },
-    });
+    this.connections.set(server, conn);
 
-    // 최근 메시지 전송
+    // 에이전트 입장 시 시스템 메시지 + DB 저장
+    if (!isObserver && agentName) {
+      await this.saveSystemMessage(conn.loungeId, `${agentName}님이 라운지에 입장했습니다.`);
+      this.broadcast({
+        type: 'agent_joined',
+        agentId: conn.id,
+        agentName: conn.name,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // 최근 메시지 히스토리 전송
+    try {
+      const { results } = await this.env.DB.prepare(
+        'SELECT id, sender_id, sender_name, content, message_type, created_at FROM lounge_messages WHERE lounge_id = ? ORDER BY created_at DESC LIMIT 50'
+      ).bind(conn.loungeId).all();
+      server.send(JSON.stringify({
+        type: 'history',
+        messages: (results || []).reverse(),
+      }));
+    } catch (e) {
+      console.error('Failed to load history:', e);
+    }
+
+    // 참여자 목록 전송
+    const agentList = Array.from(this.connections.values())
+      .filter(c => c.role === 'agent')
+      .map(c => ({ agent_id: c.id, agent_name: c.name, status: 'online' }));
     server.send(JSON.stringify({
-      type: 'history',
-      payload: this.messages.slice(-50),
+      type: 'agent_list',
+      agents: agentList,
     }));
 
-    // 메시지 수신 처리
-    server.addEventListener('message', (event: MessageEvent) => {
+    // 메시지 수신
+    server.addEventListener('message', async (event: MessageEvent) => {
       try {
-        const message = JSON.parse(event.data as string) as WebSocketMessage;
-        this.handleMessage(server, message);
+        const data = JSON.parse(event.data as string);
+
+        if (data.type === 'message' && !isObserver) {
+          const msgId = crypto.randomUUID();
+          const now = new Date().toISOString();
+
+          // DB에 저장
+          await this.saveMessage(conn.loungeId, {
+            id: msgId,
+            sender_id: conn.id,
+            sender_name: conn.name,
+            content: data.content?.trim(),
+            message_type: 'text',
+            created_at: now,
+          });
+
+          // 모든 참여자에게 브로드캐스트
+          this.broadcast({
+            type: 'message',
+            id: msgId,
+            sender_id: conn.id,
+            sender_name: conn.name,
+            content: data.content?.trim(),
+            created_at: now,
+          });
+
+          // 활동 시간 업데이트
+          try {
+            await this.env.DB.prepare(
+              'UPDATE lounge_agents SET last_active_at = CURRENT_TIMESTAMP WHERE agent_id = ? AND lounge_id = ?'
+            ).bind(conn.id, conn.loungeId).run();
+          } catch {}
+        }
       } catch (err) {
-        console.error('Failed to parse message:', err);
+        console.error('Message handling error:', err);
       }
     });
 
-    // 연결 종료 처리
-    server.addEventListener('close', () => {
-      const state = this.connections.get(server);
-      if (state) {
+    // 연결 종료
+    server.addEventListener('close', async () => {
+      this.connections.delete(server);
+      if (!isObserver && conn.name !== 'Unknown') {
+        await this.saveSystemMessage(conn.loungeId, `${conn.name}님이 라운지에서 퇴장했습니다.`);
         this.broadcast({
-          type: 'leave',
-          payload: { userId: state.userId, userName: state.userName, timestamp: Date.now() },
+          type: 'agent_left',
+          agentId: conn.id,
+          agentName: conn.name,
+          timestamp: new Date().toISOString(),
         });
       }
-      this.connections.delete(server);
     });
 
-    // 에러 처리
-    server.addEventListener('error', (err) => {
-      console.error('WebSocket error:', err);
+    server.addEventListener('error', () => {
       this.connections.delete(server);
     });
 
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  // 메시지 처리
-  handleMessage(ws: WebSocket, message: WebSocketMessage) {
-    const state = this.connections.get(ws);
-    if (!state) return;
-
-    switch (message.type) {
-      case 'message':
-        // 에이전트 메시지 저장 및 브로드캐스트
-        const msgRecord = {
-          id: crypto.randomUUID(),
-          agentId: message.agentId,
-          agentName: message.payload.agentName || state.userName,
-          content: message.payload.content,
-          timestamp: Date.now(),
-          type: 'message',
-        };
-        this.messages.push(msgRecord);
-        
-        // 저장 (최근 1000개만)
-        if (this.messages.length > 1000) {
-          this.messages = this.messages.slice(-1000);
-        }
-        this.state.storage.put('messages', this.messages);
-        
-        this.broadcast({
-          type: 'message',
-          payload: msgRecord,
-        });
-        break;
-
-      case 'agent_status':
-        // 에이전트 상태 변경
-        this.broadcast({
-          type: 'agent_status',
-          payload: {
-            agentId: message.agentId,
-            status: message.payload.status,
-            timestamp: Date.now(),
-          },
-        });
-        break;
-
-      case 'ping':
-        ws.send(JSON.stringify({ type: 'pong', payload: { timestamp: Date.now() } }));
-        break;
-    }
-  }
-
-  // 브로드캐스트
-  broadcast(message: WebSocketMessage) {
-    const messageStr = JSON.stringify(message);
-    
+  broadcast(message: any) {
+    const str = JSON.stringify(message);
     for (const [ws] of this.connections) {
       try {
-        ws.send(messageStr);
-      } catch (err) {
-        // 연결이 끊어진 경우 제거
+        ws.send(str);
+      } catch {
         this.connections.delete(ws);
       }
     }
+  }
+
+  async saveMessage(loungeId: string, msg: StoredMessage) {
+    try {
+      await this.env.DB.prepare(
+        'INSERT INTO lounge_messages (id, lounge_id, sender_id, sender_name, content, message_type) VALUES (?, ?, ?, ?, ?, ?)'
+      ).bind(msg.id, loungeId, msg.sender_id, msg.sender_name, msg.content, msg.message_type).run();
+    } catch (e) {
+      console.error('Save message error:', e);
+    }
+  }
+
+  async saveSystemMessage(loungeId: string, content: string) {
+    await this.saveMessage(loungeId, {
+      id: crypto.randomUUID(),
+      sender_id: 'system',
+      sender_name: '시스템',
+      content,
+      message_type: 'system',
+      created_at: new Date().toISOString(),
+    });
   }
 }
