@@ -225,19 +225,108 @@ app.get('/agents', async (c) => {
 // GET /api/lounge/lounges - 라운지 목록
 // ==========================================
 app.get('/lounges', async (c) => {
-  const { results } = await c.env.DB.prepare(
-    'SELECT l.id, l.name, l.description, l.is_active, COUNT(la.id) as agent_count FROM lounges l LEFT JOIN lounge_agents la ON l.id = la.laounge_id AND la.status = ? WHERE l.is_active = 1 GROUP BY l.id'
-  ).bind('online').all();
-
-  // 쿼리 에러 방지를 위해 간단한 쿼리로 변경
   const lounges = await c.env.DB.prepare(
-    'SELECT id, name, description, is_active FROM lounges WHERE is_active = 1'
+    `SELECT l.id, l.name, l.description, l.is_public, l.is_active, l.owner_id, l.created_at,
+            (SELECT COUNT(*) FROM lounge_agents WHERE lounge_id = l.id AND status = 'online') as online_count
+     FROM lounges l WHERE l.is_active = 1 ORDER BY l.created_at DESC`
   ).all();
 
   return c.json({
     success: true,
     data: { lounges: lounges.results || [] },
   });
+});
+
+// ==========================================
+// POST /api/lounge/create - 라운지 생성 (인증 필요)
+// ==========================================
+app.post('/create', async (c) => {
+  const authHeader = c.req.header('Authorization');
+  if (!authHeader?.startsWith('Bearer ')) {
+    return c.json({ error: '인증이 필요합니다.' }, 401);
+  }
+
+  // 유저 토큰 검증
+  const token = authHeader.substring(7);
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  let userId = '';
+  try {
+    const parts = token.split('.');
+    const payload = JSON.parse(decoder.decode(Uint8Array.from(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')), char => char.codePointAt(0) as number)));
+    userId = payload.id;
+  } catch {
+    return c.json({ error: '유효하지 않은 토큰입니다.' }, 401);
+  }
+
+  const body = await c.req.json();
+  const { name, description, isPublic } = body;
+
+  if (!name?.trim()) {
+    return c.json({ error: '라운지 이름은 필수입니다.' }, 400);
+  }
+
+  if (name.trim().length > 50) {
+    return c.json({ error: '이름은 50자 이하로 입력해주세요.' }, 400);
+  }
+
+  const id = `lounge-${crypto.randomUUID().replace(/-/g, '').substring(0, 8)}`;
+
+  await c.env.DB.prepare(
+    'INSERT INTO lounges (id, name, description, owner_id, is_public, is_active) VALUES (?, ?, ?, ?, ?, 1)'
+  ).bind(id, name.trim(), description?.trim() || null, userId, isPublic ? 1 : 0).run();
+
+  return c.json({
+    success: true,
+    data: { id, name: name.trim(), description, isPublic: !!isPublic },
+    message: '라운지가 생성되었습니다!',
+  });
+});
+
+// ==========================================
+// DELETE /api/lounge/:loungeId - 라운지 삭제 (소유자만)
+// ==========================================
+app.delete('/:loungeId', async (c) => {
+  const authHeader = c.req.header('Authorization');
+  if (!authHeader?.startsWith('Bearer ')) {
+    return c.json({ error: '인증이 필요합니다.' }, 401);
+  }
+
+  const token = authHeader.substring(7);
+  const decoder = new TextDecoder();
+  let userId = '';
+  try {
+    const parts = token.split('.');
+    const payload = JSON.parse(decoder.decode(Uint8Array.from(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')), char => char.codePointAt(0) as number)));
+    userId = payload.id;
+  } catch {
+    return c.json({ error: '유효하지 않은 토큰입니다.' }, 401);
+  }
+
+  const loungeId = c.req.param('loungeId');
+
+  if (loungeId === 'lounge-public') {
+    return c.json({ error: '공개 라운지는 삭제할 수 없습니다.' }, 403);
+  }
+
+  const lounge = await c.env.DB.prepare(
+    'SELECT owner_id FROM lounges WHERE id = ?'
+  ).bind(loungeId).first() as any;
+
+  if (!lounge) {
+    return c.json({ error: '라운지를 찾을 수 없습니다.' }, 404);
+  }
+
+  if (lounge.owner_id !== userId) {
+    return c.json({ error: '라운지 삭제 권한이 없습니다.' }, 403);
+  }
+
+  // 비활성화
+  await c.env.DB.prepare(
+    'UPDATE lounges SET is_active = 0 WHERE id = ?'
+  ).bind(loungeId).run();
+
+  return c.json({ success: true, message: '라운지가 삭제되었습니다.' });
 });
 
 export default app;
