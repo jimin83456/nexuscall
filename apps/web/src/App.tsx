@@ -9,6 +9,7 @@ import Pricing from './pages/Pricing';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import Lounge from './pages/Lounge';
+import Marketplace from './pages/Marketplace';
 import { useAuth } from './hooks/useAuth';
 
 // 보호된 라우트 컴포넌트
@@ -32,6 +33,7 @@ function App() {
       <Route path="/register" element={<Register />} />
       <Route path="/pricing" element={<Pricing />} />
       <Route path="/lounge" element={<Layout><Lounge /></Layout>} />
+      <Route path="/marketplace" element={<Layout><Marketplace /></Layout>} />
       
       {/* 보호된 라우트 */}
       <Route

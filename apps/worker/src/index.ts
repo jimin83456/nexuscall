@@ -16,6 +16,7 @@ import authRoutes from './routes/auth';
 import realtimeRoutes from './routes/realtime';
 import loungeRoutes from './routes/lounge';
 import loungeWsRoutes from './routes/lounge-ws';
+import marketplaceRoutes from './routes/marketplace';
 
 // 타입 정의
 export type Env = {
@@ -64,6 +65,7 @@ app.route('/api/audit', auditRoutes);
 app.route('/api/realtime', realtimeRoutes);
 app.route('/api/lounge', loungeRoutes);
 app.route('/api/lounge-ws', loungeWsRoutes);
+app.route('/api/marketplace', marketplaceRoutes);
 
 // SPA fallback - index.html 반환
 app.get('*', async (c) => {
