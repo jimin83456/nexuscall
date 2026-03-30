@@ -2,6 +2,8 @@
 @tailwind components;
 @tailwind utilities;
 
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&display=swap');
+
 /* 기본 스타일 */
 @layer base {
   * {
@@ -12,19 +14,20 @@
     @apply antialiased;
   }
   
-  /* 스크롤바 스타일 */
+  ::selection {
+    @apply bg-primary-400/30 text-white;
+  }
+  
+  /* 스크롤바 */
   ::-webkit-scrollbar {
-    @apply w-2;
+    @apply w-1.5;
   }
-  
   ::-webkit-scrollbar-track {
-    @apply bg-dark-900;
+    @apply bg-transparent;
   }
-  
   ::-webkit-scrollbar-thumb {
-    @apply bg-dark-700 rounded-full;
+    @apply bg-dark-700/50 rounded-full;
   }
-  
   ::-webkit-scrollbar-thumb:hover {
     @apply bg-dark-600;
   }
@@ -32,54 +35,77 @@
 
 /* 커스텀 컴포넌트 */
 @layer components {
-  /* 버튼 */
   .btn {
-    @apply px-4 py-2 rounded-lg font-medium transition-all duration-200;
+    @apply px-4 py-2 rounded font-medium transition-all duration-200;
   }
   
   .btn-primary {
     @apply bg-primary-500 hover:bg-primary-600 text-white;
+    @apply shadow-[0_0_20px_rgba(249,115,22,0.15)];
+  }
+  
+  .btn-primary:hover {
+    @apply shadow-[0_0_30px_rgba(249,115,22,0.25)];
   }
   
   .btn-secondary {
-    @apply bg-dark-800 hover:bg-dark-700 text-white;
+    @apply bg-dark-800 hover:bg-dark-700 text-white border border-dark-700/50;
   }
   
   .btn-outline {
-    @apply border-2 border-primary-500 text-primary-500 hover:bg-primary-500 hover:text-white;
+    @apply border border-dark-600 text-white hover:bg-dark-800;
   }
   
-  /* 입력 필드 */
+  .btn-glow {
+    @apply bg-primary-500 text-white font-bold;
+    @apply shadow-[0_0_25px_rgba(249,115,22,0.3)];
+    @apply hover:shadow-[0_0_35px_rgba(249,115,22,0.45)];
+    @apply active:scale-95 transition-all;
+  }
+  
   .input {
-    @apply w-full px-4 py-2 bg-dark-900 border border-dark-700 rounded-lg
+    @apply w-full px-4 py-2 bg-dark-900/80 border border-dark-700/50 rounded text-sm
            text-white placeholder-dark-500
-           focus:outline-none focus:border-primary-500 focus:ring-1 focus:ring-primary-500;
+           focus:outline-none focus:border-primary-500/50 focus:ring-1 focus:ring-primary-500/30;
   }
   
-  /* 카드 */
   .card {
-    @apply bg-dark-900 border border-dark-800 rounded-xl p-6;
+    @apply bg-[#0f141a]/80 border border-dark-800/50 rounded-lg p-6;
   }
   
-  /* 배지 */
+  .card-glass {
+    background: rgba(15, 20, 26, 0.6);
+    backdrop-filter: blur(20px);
+    @apply border border-dark-800/30 rounded-lg p-6;
+  }
+  
   .badge {
     @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
   }
   
   .badge-success {
-    @apply bg-green-500/20 text-green-400;
+    @apply bg-green-500/15 text-green-400 border border-green-500/20;
   }
   
   .badge-warning {
-    @apply bg-yellow-500/20 text-yellow-400;
+    @apply bg-yellow-500/15 text-yellow-400 border border-yellow-500/20;
   }
   
   .badge-error {
-    @apply bg-red-500/20 text-red-400;
+    @apply bg-red-500/15 text-red-400 border border-red-500/20;
   }
   
   .badge-info {
-    @apply bg-blue-500/20 text-blue-400;
+    @apply bg-blue-500/15 text-blue-400 border border-blue-500/20;
+  }
+
+  .neon-border {
+    @apply border-primary-500/30;
+    box-shadow: 0 0 15px rgba(249, 115, 22, 0.08);
+  }
+
+  .section-label {
+    @apply text-[10px] font-bold uppercase tracking-[0.15em] text-dark-500;
   }
 }
 
@@ -90,30 +116,46 @@
   }
   
   .animate-slide-up {
-    animation: slideUp 0.3s ease-out;
+    animation: slideUp 0.4s ease-out;
   }
-  
+
   .animate-pulse-slow {
     animation: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  .agent-pulse {
+    animation: agentPulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+
+  .font-headline {
+    font-family: 'Space Grotesk', system-ui, sans-serif;
   }
 }
 
 @keyframes fadeIn {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
+  from { opacity: 0; }
+  to { opacity: 1; }
 }
 
 @keyframes slideUp {
-  from {
-    transform: translateY(10px);
-    opacity: 0;
-  }
-  to {
-    transform: translateY(0);
-    opacity: 1;
-  }
+  from { transform: translateY(10px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes agentPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .5; transform: scale(1.2); }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-6px); }
 }
